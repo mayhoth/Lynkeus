@@ -1,0 +1,27 @@
+#! perl
+use v5.36;
+use lib '../lib';
+use Diogenes::Search;
+use Data::Dumper;
+
+my $query = Diogenes::Search->new
+  (
+   -type => 'tlg',
+   -pattern => ' kuwn '
+  );
+my @auth = $query->select_authors
+  (-author_regex => 'Aristot');
+# print Dumper(@auth);
+say "$_" for @auth;
+
+my $seeen = $query->pgrep;
+
+print Dumper($seeen);
+
+
+# $query->pgrep;
+### TLG Categories
+# my $categories = $query->select_authors
+#   (get_tlg_categories => '1');
+# say for keys %{$categories};
+# print Dumper($categories);

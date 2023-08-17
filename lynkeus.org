@@ -1,0 +1,242 @@
+#+TITLE: Lynkeus: Eine Software zum Auffinden inhaltlicher Parallelstellen zu einem gegebenen griechischen Text
+#+AUTHOR: Michael Neidhart
+#+DATE: 16. Juni 2023
+
+* Notizen
+- Die Behandlung des Artikels ist entscheidend! Flag für die semantische
+Beachtung von ἕν und τὸ ἕν
+- Ngramme?
+
+* Suchparameter
+Vor dem Start von Lynkeus müssen vom Benutzer die folgenden
+Suchparameter festgelegt werden:
+
+** Suchart (Standart: -lsp)
+Für die Suchart wären folgende Modi anzudenken:
+
+*** Verbatim (-v)
+Findet nur Stellen, an denen dieselbe Form vorkommt. (Nachzudenken
+wäre darüber diese Form leicht zu normalisieren, d.h. Elisionen und
+Apokope möglich zu machen, indem man den ersten und letzten Buchstaben
+optional macht, also etwa mit =.?.+.?=.)
+*** Lexikalische Suche (/lemmata/, -l)
+Findet Stellen, an denen eine in der TLG-Wordlist belegte Form des
+Wortes vorkommt.
+*** Synonymsuche (/synonyma/, -s)
+Findet  Stellen, an denen in den Synonymlisten aufgeführte
+Wörter vorkommen.
+*** Suche nach benachbarten Termini  (/termini propinqui/ -p)
+Findet Stellen, an denen semantisch relevante Wörter
+vorkommen, die häufig in Verbindung mit den gesuchten Wörtern
+auftreten.
+**** Kontextlänge der benachbarten Termini (Standart: ·)
+-p kann zusätzlich einen Wert zu sich nehmen, der bestimmt, in welchem
+Kontext benachbarte Begriffe besucht werden. Dieser kann folgende
+Werte haben:
+
+- Eine beliebige Zahl (/D/): Anzahl der Worte vor und nach dem Treffer,
+  die in Betracht zu ziehen sind.
+- Paragraph (P): Der ganze umgebende Paragraph.
+- Satz (.): Der aktuelle Satz (.;).
+- Kolon (·): Das aktulle Kolon (.;·).
+- Komma (,): Das aktuelle Komma (.;·,)
+
+Schauen müsste man hier, wie genau der Status der Anführungszeichen
+sowie weiterer Interpunktionssymbole ist.
+
+** Lateinische Parallelstellen (/Latine/, -L)
+Eine Suche nach lateinischen Parallelstellen lässt sich umsetzen, wenn
+wir über ein digitales Griechisch-Lateinisches Wörterbuch verfügen, in
+dem die Begriffe nachgeschlagen werden und dann im PHI gesucht werden:
+Durch diesen Ansatz ist eine suche nach Lateinische Parallelstellen
+immer schon auch eine Synoymensuche. 
+
+*** Benachbarte Termini (-Lp)
+Eine Suche nach lateinischen Parallelstellen + benachbarten Termini.
+Diese ist wohl eher so umzusetzen, dass -L lateinische Übersetzungen
+zum gesuchten Terminus sucht und -p dann Begriffe, die in der Nähe zu
+diesen Termini stehen
+
+** Kontextlänge der Parallelstelle (-c Standart: ?)
+Legt die Länge der Parallelstelle fest, innerhalb der die gesuchten
+Begriffe vorkommen müssen. Diese Werte sind schwer zu verallgemeinern,
+da die Indizes des TLG ganz unterschiedliche Einheiten (Verse,
+Paragraphen, Seiten, Lemmata) tragen. Einfach und verlässlich lässt
+sich vielleicht nur ein Umfang in Wörtern umsetzen: Dies lässt
+sich allerdings nicht mit dem geplanten Algorhythmus vereinbaren, der
+ja keine Texte speichert und vergleicht, sondern nur die Stellen
+herausschreibt. Hier sind Ideen gefragt!
+
+** Schwellwerte für die einzelnen Modi:
+-l = 2
+-s = 2+
+-p = 4+
+
+oder so ähnlich…
+
+** Ausgabe
+Die Ausgabe lässt wieder verschiedene Optionen zu:
+*** Liste (/index/, -i)
+Lynkeus gibt eine Liste mit den wahrscheinlichen Parallelstellen aus.
+In Verbindung mit einer schnellen Nachschlagefunktion (-> Diogenes,
+->Emacs) meine bevorzugte Standarteinstellung. In Emacs könnte man
+auch an eine ausklappbare Liste denken. 
+
+*** Ausgabe der Stellen als plain text
+Dies wäre eine andere Option. Hier müsste als Parameter der Umfang der
+auszugebenden Stelle anzugeben sein. Backend kann hier wieder Diogenes sein.
+*** Ausgabe im Browser mit klickbaren Wörtern
+Auch hier ist an Diogenes zu denken.
+
+
+* Benutzerschnittstelle
+Der Benutzer kann die Standarteinstellungen wie folgt ändern (die
+Methoden werden in dieser Reihenfolge abgearbeitet, d.h. spätere
+Methoden überschreiben die vorangehenden.
+
+** Konfigurationsdatei
+Die Standarteinstellungen können in der Konfigurationsdatei geändert
+werden. Diese wird, wenn vorhanden, vor dem Programmstart ausgelesen.
+Die Konfigurationsdatei besteht aus einfachen Paaren von
+Schlüsselwörtern und Werten, die durch ein Gleichheitszeichen
+verbunden sind. Leerraum wird ignoriert:
+
+#+begin_example
+KEY=VALUE KEY=VALUE KEY=VALUE
+#+end_example
+
+Geparst wird diese Datei daher wie folgt (ungetestet):
+
+#+begin_src perl
+  my %config; 	   # HASH, der die Konfigurationsdaten enthält
+  my @config_keys; # Liste der erlaubten Schlüsselwörter
+  open (my $config_fh, "<", ".lynkeus") or warn "No configuration file found!";
+
+  $\ = " ";
+  while (<CONFIG>) {
+    if (m/(w+)=(w+)/){
+      if ($1 ~~ @config_keys)
+	{$config{$1} = $2;}
+      else
+	{warn "Undefined key in config file: $1"}
+    }
+  }
+#+end_src
+
+** Kommandozeilenargumente
+Alternativ können die Variablen auch als Parameter von der
+Kommandozeile eingelesen werden. Diese Parameter müssen vor dem zu
+lesenden Text übergeben werden und werden mit shift aus der @ARGV
+herausgefiltert:
+
+#+begin_src perl
+  my %config;
+  if ($ARGV[0] =~ /-(\w+/)\s(/\S+/)) {
+    for ($1) {
+      when (s/s//) { $config{…} = 1 } # single-letter switch
+      when (s/l//) {
+	$config{…} = $2;
+	shift @ARGV;
+      } # switch requiring an argument
+      default {die "unknown parameter: -$1"}
+    }
+    shift @ARGV;
+  }
+#+end_src
+
+** Eine einfache graphische Oberfläche
+Die Parameter können auch durch eine einfache (Web-)Oberfläche
+übergeben werden, die 
+- mit JavaScript und Electron
+- Qt
+- oder direkt mit Perl
+erstellt werden kann. Diese Oberfläche würde dann sowohl die
+Konfigurationsdatei schreiben als auch Lynkeus im Hintergrund
+aufrufen und die Parameter übergeben. Die Ausgabe müsste dann
+ebenfalls in diese Oberfläche abgeleitet werden.
+
+
+* Texteingabe
+Lynkeus erhält als Eingabe einen griechischen Text beliebiger Länge
+(über <>). Dieser Text wird dann in einzelne Wörter zerlegt, die dann
+weiter verarbeitet werden.
+
+(Die einzelnen Wörter können an dieser Stelle gefiltert werden.
+Denkbar wäre, standartmäßig alle im Normalfall insignifikanten Wörter
+(abgelegt zb. in der Datei greek_small_words.txt) auszufiltern.)
+
+* Verarbeitung der Einzelwörter
+Die einzelnen Begriffe werden dann jeweils durch verschiedene Filter
+geschickt.
+
+** Verbatim vs. Lemma
+Der erste Schritt ist immer eine Diogenes-Suche. Dieser Schritt
+unterscheidet sich je nach dem, ob -v oder -l gewählt wurde. Bei -v
+wird der Suchstring nur leicht modifiziert (in etwa
+=/[αεηιοωυ]?.+[αεηιοωυ]?/=).
+
+Wenn -l gewählt wurde, passiert dagegen Folgendes:
+- Die Datei greek-lemmata.txt wird in dem Hash %greek_lemmata
+  abgelegt: Die Lemmata bilden die Schlüsselwörter, die griechischen
+  Begriffe die Einträge (als String), also etwa:
+
+#+begin_src perl
+  my %greek_lemma;
+  open my $greek_lemmata_fh, "<", "greek_lemmata.txt";
+  while (<$greek_lemmata_fh>) {
+    $greek_lemma{$1} = $2 if m/^(\S+)\s+(.+)$/;
+  }
+#+end_src
+
+- Der gegebene Begriff in greek-lemmata.txt nachgeschlagen: Dort wird
+  jeder belegte Begriff in eine Liste (%lemma) aufgenommen
+
+#+begin_src perl
+  my $word;
+  my %lemma;
+    foreach key @greek_lemma {
+      $lemma{$_}++ if $greek_lemma{$_} =~ m/\b$word\b/;
+     }
+#+end_src
+
+- Diese Liste wird iterativ durchsucht: Die Ergebnisse jeder dieser
+  Suchen wird an die Datei begriff_lemmata.txt (oder besser: der
+  Variable $begriff_lemmata) angehängt.
+
+** Synonymliste
+Wenn -s gewählt wurde, muss bereits beim Nachschlagen in
+greek-lemmata.txt das jeweilige Lemma in einer Liste vermerkt werden.
+
+Diese Liste wird nun im Folgenden in einem Synoym-Wörterbuch
+nachgeschlagen.
+
+Für jedes der gefundenen Synonyme wird nochmal die greek-lemmata.txt
+aufgesucht und dort sämliche Formen in eine Suchliste aufgenommen.
+
+Diese Liste wird nun iterativ durchsucht: Die Ergebnisse werden in der
+Datei begriff_synonyme.txt abgespeichert.
+
+** Nachbarbegriffe
+Wenn -p gewählt wurde, werden die bereits abgespeicherten Listen
+durchsucht.
+
+Dabei wird die Zeichenkette isoliert, in dem der Treffer sich
+befindet: Diese hat den in den Parametern angegebenen Umfang.
+
+Diese Zeichenkette wird nachbearbeitet, dass daraus die Wörter
+gewonnen werden können.
+
+Diese Wörter werden 
+*** Erstellen einer Nachbarliste aus den Treffern der vorangegangenen Suchen 
+*** Suche nach den so gewonnen Begriffen
+** Auswertung:
+*** Speichern der Liste.
+*** Anlegen eines Index der gefundenen Stellen. Hier ist für jede Stelle aufzunehmen:
+**** Treffer der lexikalischen Suche
+**** Treffer der Synonymensuche
+**** Treffer der Suche nach benachbarten Termini
+
+* Auswertung der Gesamtergebnisse
+** Vergleichen der Indizes der Einzelwörter
+** Wenn in einer Gesamtstelle der Schwellwert von x lexikalischen Treffern, y synoymen Treffern und/oder z propinqualen Treffern überschritten ist, wird die Stelle in die Ausgabeliste aufgenommen.
+

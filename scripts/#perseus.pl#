@@ -1,0 +1,8 @@
+#! perl
+use v5.36;
+use lib '../lib';
+use Diogenes::Perseus;
+use Data::Dumper;
+
+$Diogenes::Perseus::setup
+$Diogenes::Perseus::do_lookup->
