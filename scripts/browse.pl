@@ -3,23 +3,37 @@ use v5.36;
 use lib '../lib';
 use Diogenes::Browser;
 
-my $query = Diogenes::Browser->new
+my $offset = 5160469;
+
+my $q = Diogenes::Browser::Lynkeus->new
   (
    -type => 'tlg',
   );
 
-my @result = $query->seek_passage
+my $auth = sprintf "%04d", 86;
+my $work = 34;
+my $start = $q->get_relative_offset($offset, 86, 34);
+
+
+my @offset = $q->seek_passage
   (
-   $query->parse_idt('0086'),
-   '1',
-   # (1, 1, 0)
+   $auth,
+   '34',
+#   (1, '1448a', 10)
   );
-map say, @result;
 
-while ( $query->browse_forward() ) {};
+# $start = $q->get_relative_offset($offset[0], 86, 34);
 
-# print "\n";
-
+@offset = $q->browse_forward($start, -1);say for @offset;
+while ((my $inp = <STDIN>) ne "q\n")
+  {
+    @offset = $q->browse_forward(@offset);say ""; say for @offset;
+    say $q->{current_work};
+    say $q->{work_num};
+  }
+@offset = $q->browse_forward(@offset);say for @offset;
+@offset = $q->browse_backward(@offset);say for @offset;
+@offset = $q->browse_backward(@offset);say for @offset;
 
 
 

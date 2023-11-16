@@ -1,6 +1,7 @@
 package Diogenes::Search;
 use Diogenes::Base qw(%work %author %work_start_block %level_label %context);
 use Carp;			# Lynkeus
+use Data::Dumper;
 @Diogenes::Search::ISA = ('Diogenes::Base');
 
 # Lynkeus
@@ -79,13 +80,23 @@ sub pgrep
 
     if (@ARGV)
     {
-        # Do the (full-file) search.  
+        # Do the (full-file) search.
+        # Lynkeus
+	my $author_iteration = 0;
         # print Data::Dumper->Dump(\@ARGV);
         while ($buf = <>) 
         {
             my $auth_num = $ARGV;
             $auth_num =~ tr/0-9//cds;
             next if $already_seen{$auth_num};
+
+	    # Lynkeus
+	    my $total_author_count = @ARGV;
+	    # print STDERR
+	    #   "AUTHOR $author_iteration $total_author_count\n";
+	    # print { $self->{lynkeus_fh} }
+	    #   "A: ", $author_iteration++, " $total_author_count\n"
+	    #   if $self->{lynkeus_fh};
 
             # Search for the minimum necessary number of patterns
             for (   my $pass = 0; $pass <= $final_pass; $pass++  )
@@ -102,8 +113,12 @@ sub pgrep
                 # }
                 my $pattern = @{ $self->{pattern_list} }[$pass];
 		# # LYNEKUS test
-                print STDERR "\rPASS $pass of $final_pass" if $final_pass;
-		print STDERR "\n" if $pass == $final_pass && $final_pass;
+                # print STDERR "\rPASS $pass of $final_pass" if $final_pass;
+		# print STDERR "\n" if $pass == $final_pass && $final_pass;
+		if ($self->{lynkeus_fh} and $final_pass) {
+		  # print STDERR "$pass $final_pass\n";
+		  print  { $self->{lynkeus_fh} } "P: $pass\n";
+		}
                 # clear the last search
                 undef $self->{seen}{$ARGV};
                 undef $self->{match_start}{$ARGV};
@@ -912,7 +927,7 @@ sub extract_hits
         $this_work = "$author{$self->{type}}{$self->{auth_num}}, ";
         $this_work .= 
             "$work{$self->{type}}{$self->{auth_num}}{$self->{work_num}} ";
-        $location .= ($self->{print_bib_info} and not  $self->{bib_info_printed}{$self->{auth_num}}{$self->{work_num}})
+	$location .= ($self->{print_bib_info} and not  $self->{bib_info_printed}{$self->{auth_num}}{$self->{work_num}})
             ? $self->get_biblio_info($self->{type}, $self->{auth_num}, $self->{work_num})
             : $this_work;
 
@@ -954,6 +969,9 @@ sub extract_hits
 	if ($info) {
 	  $location .= "\n###INFO###";
 	}
+	else {			# fix for mysterious bug
+	  $result .= "\n"
+	}
 
         $location .= "\n\n";
         if ($Diogenes::Base::cgi_flag and $self->{cgi_buttons})
@@ -964,7 +982,7 @@ sub extract_hits
         else
         {
 	  # Lynkeus
-	  $result .= "\n\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n";
+	  $result .= "\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n";
 	  # $result .= "\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n";
         }
         my $base = ($self->{current_lang} eq 'g')

@@ -303,7 +303,15 @@ sub make_lemma_patterns {
       }
     }
     my $pattern = join '|', @subpatterns;
-    $pattern = "($pattern)";
+    # we can skip the parens if
+    # - there is only one subpattern
+    # - and the whole group is not optional
+    return $pattern if (not $#subpatterns and not $optional);
+
+    # no parens around a single letter needed!
+    $pattern = (length($pattern) > 1)
+      ? "($pattern)"
+      : $pattern;
     if ($optional) {
       $pattern = ($chop_optional_groups)
 	? ''
@@ -453,9 +461,9 @@ for (0..$#patterns) {
 #    -pattern_list => \@patterns,
 #   );
 
-# $query->select_authors(-author_nums => [86]);
-# my $str;
-# { local *STDOUT;
-#   open STDOUT, '>', \$str;
+# # $query->select_authors(-author_nums => [86]);
+# # my $str;
+# # { local *STDOUT;
+# #   open STDOUT, '>', \$str;
 #   $query->do_search;
-# }
+# # }

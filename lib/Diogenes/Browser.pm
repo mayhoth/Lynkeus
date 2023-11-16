@@ -71,7 +71,7 @@ sub seek_passage
     my $self = shift;
     my ($auth, $work, @array_target) = @_;
     my ($start_block, $end_block, $code, $lev, $top_level, $look_ahead);
-    my ($top_num, $target_num, $level_num, $i);
+    my ($top_num, $target_num, $level_num, $i);  
     
     # We turn the passed array into a hash, to match the data gleaned
     # from the .idt file.
@@ -587,6 +587,20 @@ sub browse_forward
         $ref = \$buf;
         $self->{browse_begin} = $begin;
         $begin = $begin - $offset;
+      }
+    # Lynkeus
+    elsif (ref $self eq 'Diogenes::Browser::Lynkeus') {
+        my ($args_begin, $args_end) = @_;
+	if (defined $args_end) {
+	  $self->{browse_begin} = shift;
+	  $self->{browse_end}   = shift;
+	}
+	delete $self->{interleave_printing};
+	delete $self->{bib_info_printed};
+	$ref = $self->{browse_buf_ref};
+        $self->{browse_begin} = $self->{browse_end} unless $self->{browse_end} == -1;
+        $begin = $self->{browse_begin};
+        $offset = 0;
     }
     else
     { 
@@ -631,12 +645,31 @@ sub browse_forward
         $self->{interleave_printing} = $self->interleave_citations(\$result);
         $self->print_output (\$result);
     }
+    # Lynkeus bugfix
+    elsif ($self->{browse_backwards_scan})
+    {
+        $self->{browse_backwards_scan} = 0;
+        my @beginning = (0) x $self->{target_levels};
+        my $ret = $self->seek_passage ($self->{browse_auth}, $self->{browse_work}, @beginning);
+        if ($ret eq 'fail') {
+            print "Passage not found!\n";
+            return(0,0);
+        }
+        else {
+            $self->browse_forward;
+        }
+    }
     else
     {
         print "Sorry.  That's beyond the scope of the requested work.\n" unless 
-            $self->{quiet};
-        last PASS;
+	  $self->{quiet} or ref $self eq 'Diogenes::Browser::Lynkeus';
+	# Lynkeus bugfix
+        # last PASS;
+	return $self->{browse_begin}, -1;
     }
+    # Part of Lynkeus bugfix
+    $self->{browse_backwards_scan} = 0 if exists $self->{browse_backwards_scan};
+
     $begin = $end;
     # Store and pass back the start and end points of the whole session
     $self->{browse_end} = $end + $offset;
@@ -788,6 +821,8 @@ sub maybe_use_cit
 #     print STDERR "+--$higher +++ $line\n";
     if ($self->{work_num} != $self->{current_work})
     {
+        # Lynkeus bugfix
+        return if ref $self eq 'Diogenes::Browser::Lynkeus';
         $self->{current_work} = $self->{work_num};
         $output = $work{$self->{type}}{$self->{auth_num}}{$self->{work_num}} . ' ';
     }
@@ -825,7 +860,8 @@ sub browse_half_backward
     my @a = ($location[0], -1, $args[2], $args[3]);
     print STDERR join '--', @a if $self->{debug};
     $self->{browse_lines} = $lines;
-    $self->{browse_backwards_scan} = 0;
+    # Lynkeus bugfix
+    # $self->{browse_backwards_scan} = 0;
     $self->{browse_end} = -1;
     return $self->browse_forward(@a);
 }
@@ -881,6 +917,20 @@ sub browse_backward
         $ref = \$buf;
         $self->{browse_end} = $end;
         $end = $end - $offset;
+    }
+    # Lynkeus
+    elsif (ref $self eq 'Diogenes::Browser::Lynkeus') {
+        my ($args_begin, $args_end) = @_;
+	if (defined $args_end) {
+	  say STDERR $self->{browse_begin} = shift;
+	  say STDERR $self->{browse_end}   = shift;
+	}
+	delete $self->{interleave_printing};
+	delete $self->{bib_info_printed};
+        $ref = $self->{browse_buf_ref};
+        $end = $self->{browse_begin};
+        $self->{browse_end} = $end;
+        $offset = 0;
     }
     else
     { 
@@ -961,4 +1011,22 @@ package Diogenes::Browser::Stateless;
 # Everything is delegated to the parent -- browse_forward and
 # browse_backward work somewhat differently and expect arguments
 
-1;
+# Lynkeus
+package Diogenes::Browser::Lynkeus;
+use Diogenes::Base qw(%work %author %work_start_block %level_label %top_levels %last_citation);
+@Diogenes::Browser::Lynkeus::ISA = qw( Diogenes::Browser );
+
+sub get_relative_offset {
+  my $self   = shift;
+  my $offset = shift;
+  my $auth = sprintf "%04d", shift;
+  my $work = sprintf "%03d", shift;
+  $auth = $self->parse_idt($auth);
+  self->{browse_auth} = $auth;
+  $self->{browse_work} = $work;
+
+  my $start = $work_start_block{tlg}{$auth}{$work};
+  $start <<= 13;
+  $offset -= $start;
+  return $offset;
+}

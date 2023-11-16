@@ -1789,7 +1789,7 @@ sub parse_non_ascii
     # Parse all of the non-ascii data in this block
     while (($code = ord (substr ($$buf, $$i, 1))) >> 7)
     {
-#         printf STDERR "Code: %x \n", $code if $self->{debug};
+         printf STDERR "Code: %x \n", $code if $self->{debug};
         # Ok. This is legacy code from when I was trying to understand the
         # file formats.  At some stage this sub should be folded in with 
         # parse_bookmarks, so that level `e' ( = 6 ) is handled just like       
@@ -2154,6 +2154,10 @@ sub print_output
         my $success;
         my $first_cit = shift @{ $self->{interleave_printing} };
         $success = print $first_cit if $first_cit;
+	# # LYNKEUS
+        # $success = $first_cit
+	#   ? print $first_cit
+	#   : 1;
         print STDERR "Print failed (first_cit)! $!\n" unless $success;
         while ($$ref =~ m#(.*?)(?:\x02|$)#gs)
         {
@@ -2529,7 +2533,9 @@ sub beta_formatting_to_ascii
         and $self->{encoding} !~ m/Transliteration/i
         and $self->{encoding} !~ m/Beta/i       )
     {
-        $$ref =~ s#~[Hh]it~([^~]+)~#->$1<-#g;
+      # $$ref =~ s#~[Hh]it~([^~]+)~#->$1<-#g;
+      # Lynkeus
+      $$ref =~ s#~[Hh]it~([^~]+)~#-->$1<--#g;
     }
     else
     {
