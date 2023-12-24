@@ -9,13 +9,13 @@ use Diogenes::Browser;
 use Tkx;
 
 # Global variables
-our $column_count = shift || 2;
+our $browser_column_count = shift || 2;
 
 our $auth   = sprintf "%04d", shift // '0086';
-our $work   = sprintf "%03d",shift // '034';
+# our $work   = sprintf "%03d",shift // '034';
 our $offset = shift // 5160469;
 
-$column_count--;
+$browser_column_count--;
 
 # SYSTEM-SPECIFIC VARIABLES
 our $windowing_system = Tkx::tk_windowingsystem();
@@ -101,9 +101,9 @@ our $forward_bttn = $mfrm->new_ttk__button
   );
 
 $backward_bttn->g_grid (-column => 0, -row => 1);
-$forward_bttn->g_grid  (-column => $column_count + 2, -row => 1);
+$forward_bttn->g_grid  (-column => $browser_column_count + 2, -row => 1);
 $mfrm->g_grid_columnconfigure(0, -weight => 0);
-$mfrm->g_grid_columnconfigure($column_count + 2, -weight => 0);
+$mfrm->g_grid_columnconfigure($browser_column_count + 2, -weight => 0);
 
 our $header_txt = $mfrm->new_tk__text
     (
@@ -126,11 +126,11 @@ $header_txt->tag_configure
    -justify => "center",
   );
 
-$header_txt->g_grid(-column => 1, -columnspan => ($column_count + 1),
+$header_txt->g_grid(-column => 1, -columnspan => ($browser_column_count + 1),
 		  -row => 0, -sticky => "news");
 
 our @browser_txt;
-for my $i (0..$column_count) {
+for my $i (0..$browser_column_count) {
   $mfrm->g_grid_columnconfigure($i + 1, -weight => 1);
   $browser_txt[$i] = $mfrm->new_tk__text
     (
@@ -181,8 +181,8 @@ $mw->g_bind('<Control-KP_Add>',      [\&$browser_txt_scale, '1'] );
 $mw->g_bind('<Control-minus>',       [\&$browser_txt_scale, '-1'] );
 $mw->g_bind('<Control-KP_Subtract>', [\&$browser_txt_scale, '-1'] );
 
-$mw->g_bind('<Prior>', sub { backward() for 0..$column_count });
-$mw->g_bind('<Next>',  sub { forward()  for 0..$column_count });
+$mw->g_bind('<Prior>', sub { backward() for 0..$browser_column_count });
+$mw->g_bind('<Next>',  sub { forward()  for 0..$browser_column_count });
 $mw->g_bind('<Left>',  \&backward);
 $mw->g_bind('<Right>', \&forward);
 $mw->g_bind('<Home>',  \&begin);
@@ -201,13 +201,17 @@ my $browser = Diogenes::Browser::Lynkeus->new
    -type => 'tlg',
   );
 
+$auth = $browser->parse_idt($auth);
+my $work = $browser->get_work($auth, $offset);
+
 my @result = $browser->seek_passage
   (
-   $browser->parse_idt($auth),
+   $auth,
    $work,
    # (1, 1, 0)
   );
-# my $start = $browser->get_relative_offset($offset[0], 86, 34);
+say $result[0];
+# my $start = $browser->get_relative_offset($result[0], $auth, $work);
 my $start = $browser->get_relative_offset($offset, $auth, $work);
 
 our @buffers;
@@ -231,7 +235,7 @@ sub load_passage {
   local *STDOUT;
   open STDOUT, '>:raw', \$buf;
   @ind = $browser->browse_half_backward($start, -1);
-  say STDERR my $times = ($column_count) / 2;
+  say STDERR my $times = ($browser_column_count) / 2;
   for (1..$times) {
     $buf = '';
     open STDOUT, '>:raw', \$buf;
@@ -240,7 +244,7 @@ sub load_passage {
   unshift @buffers, \$buf;
   unshift @indices, \@ind;
 
-  browse($column_count);
+  browse($browser_column_count);
   insert_contents();
 }
 
@@ -263,7 +267,7 @@ sub browse {
  #     say STDERR for @ind;
       push @buffers, \$buf;
       push @indices, \@ind;
-      if ($#buffers > $column_count) {
+      if ($#buffers > $browser_column_count) {
 	shift @buffers; shift @indices;
 	say STDERR Dumper(@indices);
       }
@@ -274,7 +278,7 @@ sub browse {
 #      say STDERR for @ind;
       unshift @buffers, \$buf;
       unshift @indices, \@ind;
-      if ($#buffers > $column_count) {
+      if ($#buffers > $browser_column_count) {
 	pop @buffers; pop @indices;
 	say STDERR Dumper(@indices);
       }
@@ -283,7 +287,7 @@ sub browse {
 }
 
 sub insert_contents {
-  for my $i (0..$column_count) {
+  for my $i (0..$browser_column_count) {
     $browser_txt[$i]->configure(-state => 'normal');
     open my $str_fh, '<:utf8', $buffers[$i];
     local $/ = "\n\n";
@@ -346,5 +350,3 @@ sub backward {
     $backward_bttn->state("disabled");
   }
 }
-
-

@@ -1,0 +1,102 @@
+Deutsch
+
+author = Autor
+
+search = Suche
+new    = Neu
+save   = Speichern
+load   = Laden
+close  = Schließen
+quit   = Beenden
+
+pref   = Einstellungen
+lang   = Sprache
+help   = Hilfe
+
+passage = Stelle
+export   = Export
+delete_selection = Auswahl löschen
+undo   = Wiederherstellen
+show_context     = Kontext anzeigen
+export_to_txt = Exportieren als reines Textdokument
+export_to_mom = Exportieren als Groff Mom
+export_to_pdf = Exportieren als PDF
+
+search_type = Suchart
+verbatim    = verbatim
+lemma       = lemma
+synonyma    = verba synonyma
+continentia = verba continentia
+search_in   = Suche in
+
+input          = Eingabe
+lemmata        = Lemmata
+single_results = Einzelergebnisse
+result         = Gesamtergebnis
+statistics     = Statistiken
+cancel         = Abbruch
+total          = Gesamt
+apply          = Anwenden
+ok             = Ok
+
+form         = Form
+single_forms = Einzelformen
+pattern      = Muster
+pattern_ed   = Suchmuster bearbeiten
+browser      = Browser
+for          = für
+
+select_all   = Alle Formen auswählen
+select_none  = Keine Form auswählen
+
+search_term  = Suchbegriff
+numberofhits = Trefferzahl
+weight       = Gewichtung
+edit         = Bearbeiten
+continue     = Weiter
+
+view     = Ansicht
+add      = Hinzufügen
+remove   = Entfernen
+increase = Erhöhen
+decrease = Verringern
+change   = Ändern...
+result   = Ergebnis
+
+context  = Kontext
+contexts = Zeichen Kolon Satz Zeilen
+Contexts = Zeichen Kola Sätze Zeilen
+
+threshold = Schwellwert
+
+list_st      = Treffer
+total_weight = Gesamtgewicht
+
+preparing  = Sortierung
+evaluating = Ergebnis
+
+path_tlg = Pfad zum TLG
+path_phi = Pfad zum PHI
+path_ddp = Pfad zum DDP
+browse   = Durchsuchen
+defaults    = Standarteinstellungen
+browsercols = Browserspalten
+
+new_search      = Neue Suche
+message_discard = Sind Sie sicher, dass sie die aktuelle Suche verwerfen wollen?
+
+error_empty           = Bitte einen Text eingeben!
+error_save            = konnte die Ergebnisse nicht speichern in
+error_unknown_st      = Textkorpus nicht definiert:
+error_implemented_PHI = Suchen im PHI sind noch nicht verfügbar!
+error_implemented     = Noch nicht verfügbar!
+error_select          = Bitte einen Suchbegriff auswählen!
+error_results         = Keine Ergebnisse!
+error_lemma           = Keine Ergebnisse für
+
+save_nothing = Nichts zu speichern!
+save_success = Die Suche wurde erfolgreich gespeichert!
+save_failure = Konnte die Suche nicht speichern:
+
+load_failure = Konnte Datei nicht öffnen:
+load_wrong_format = Datei hat ein ungültiges Format!

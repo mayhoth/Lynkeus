@@ -1021,6 +1021,7 @@ sub get_relative_offset {
   my $offset = shift;
   my $auth = sprintf "%04d", shift;
   my $work = sprintf "%03d", shift;
+
   $auth = $self->parse_idt($auth);
   self->{browse_auth} = $auth;
   $self->{browse_work} = $work;
@@ -1029,4 +1030,21 @@ sub get_relative_offset {
   $start <<= 13;
   $offset -= $start;
   return $offset;
+}
+
+sub get_work {
+  my $self = shift;
+  my $auth = sprintf "%04d", shift;
+  my $offset = shift;
+
+  $auth = $self->parse_idt($auth);
+  my $work;
+  for my $worknum (sort {$a <=> $b} keys %{ $work_start_block{tlg}{$auth} }) {
+    my ($start, $end) = $self->seek_passage($auth, $worknum);
+    # my $start = $work_start_block{tlg}{$auth}{$worknum};
+    # $start <<= 13;
+    last if $offset <= $start;
+    $work = $worknum;
+  }
+  return $work;
 }

@@ -131,15 +131,8 @@ sub pgrep
                     push @{ $self->{seen}{$ARGV} }, pos $buf;
                     push @{ $self->{match_start}{$ARGV} }, $-[0];
 		    # Lynkeus
-		    $self->{seen_all}{$ARGV} =
-		      [ @{ $self->{seen_all}{$ARGV} },
-			@{ $self->{seen}{$ARGV} }
-		      ];
-		    $self->{match_start_all}{$ARGV} =
-		      [
-		       @{ $self->{match_start_all}{$ARGV} },
-		       @{ $self->{match_start}{$ARGV} }
-		       ];
+		    push @{ $self->{seen_all}{$ARGV} }, pos $buf;
+                    push @{ $self->{match_start_all}{$ARGV} }, $-[0];
                 }
                 if ($self->{seen}{$ARGV})
                 {
@@ -769,8 +762,15 @@ sub extract_hits
             while (substr ($$buf, ++$start, 1) =~ /[\s\d'"@}\])\x80-\xff]/) {};
         }
         
-        next HIT if $self->{already_reported}{$auth}{$start} and 
-            not $self->{check_word_stats};
+	# Lynkeus
+        # next HIT if $self->{already_reported}{$auth}{$start} and 
+	#   not $self->{check_word_stats};
+	  if ( $self->{already_reported}{$auth}{$start}
+	       and not $self->{check_word_stats} ) {
+	    my $offset = $self->{seen}{$auth}[$match];
+	    $self->{not_printed}{$auth}{$offset} = 1;
+	    next HIT;
+	   }
         
         if ($self->{numeric_context}) 
         {

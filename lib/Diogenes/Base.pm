@@ -461,20 +461,35 @@ sub new
 
     $args{ validate($_) } = $passed{$_} foreach keys %passed;
 
-    my $user_config_dir = get_user_config_dir;
-    # For prefs saved by Electron.js and Settings.cgi
-    $self->{auto_config} = File::Spec->catfile($user_config_dir, 'diogenes.prefs');
-    # For manual editing by the user
-    $self->{user_config} = File::Spec->catfile($user_config_dir, 'diogenes.config');
-    # For saving user-defined corpora
-    $self->{filter_file} = File::Spec->catfile($user_config_dir, 'diogenes.corpora');
+    # LYNKEUS
+    if    ($args{type} eq 'tlg' and exists $ENV{TLG_DIR}) {
+      $args{tlg_dir} = $ENV{TLG_DIR};
+      %{ $self } = ( %{ $self }, %defaults, %args );
+    }
+    elsif ($args{type} eq 'phi' and exists $ENV{PHI_DIR}) {
+      $args{phi_dir} = $ENV{PHI_DIR};
+      %{ $self } = ( %{ $self }, %defaults, %args );
+    }
+    elsif ($args{type} eq 'ddp' and exists $ENV{DDP_DIR}) {
+      $args{ddp_dir} = $ENV{DDP_DIR};
+      %{ $self } = ( %{ $self }, %defaults, %args );
+    }
+    else {
+      # DIOGENES
+      my $user_config_dir = get_user_config_dir;
+      # For prefs saved by Electron.js and Settings.cgi
+      $self->{auto_config} = File::Spec->catfile($user_config_dir, 'diogenes.prefs');
+      # For manual editing by the user
+      $self->{user_config} = File::Spec->catfile($user_config_dir, 'diogenes.config');
+      # For saving user-defined corpora
+      $self->{filter_file} = File::Spec->catfile($user_config_dir, 'diogenes.corpora');
 
-    # We just re-read the config file each time.  It would be nice to
-    # do this only when needed, but then you need to arrange for
-    # communication between one process doing the writing and another
-    # doing the reading.
-
-    %{ $self } = ( %{ $self }, %defaults, $self->read_config_files, %args );
+      # We just re-read the config file each time.  It would be nice to
+      # do this only when needed, but then you need to arrange for
+      # communication between one process doing the writing and another
+      # doing the reading.
+      %{ $self } = ( %{ $self }, %defaults, $self->read_config_files, %args );
+    }
     
     my @dirs = qw/tlg_dir phi_dir ddp_dir tll_pdf_dir old_pdf_dir/;
 
@@ -1789,7 +1804,7 @@ sub parse_non_ascii
     # Parse all of the non-ascii data in this block
     while (($code = ord (substr ($$buf, $$i, 1))) >> 7)
     {
-         printf STDERR "Code: %x \n", $code if $self->{debug};
+#         printf STDERR "Code: %x \n", $code if $self->{debug};
         # Ok. This is legacy code from when I was trying to understand the
         # file formats.  At some stage this sub should be folded in with 
         # parse_bookmarks, so that level `e' ( = 6 ) is handled just like       

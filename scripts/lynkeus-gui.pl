@@ -20,12 +20,143 @@ use Encode;
 
 use FindBin qw($Bin);
 use File::Spec;
+use File::Temp qw(tempfile tempdir);
 use lib File::Spec->catdir($Bin, '..', 'lib');
 use Diogenes::Search;
 use Diogenes::Indexed;
+use Diogenes::Browser;
 
 binmode STDOUT, ':utf8';
 # use open qw( :std :encoding(UTF-8) );
+
+#----------------------------------------------------------------------
+# LOAD CONFIG FILE
+#----------------------------------------------------------------------
+
+# Search Types
+our $select_st_lemma;
+our $select_st_synonyma;
+our $select_st_continentia;
+our $select_si_corpus;
+
+# Language
+our $gui_lang;
+our $default_threshold_percent;
+
+# Browser apperance
+our $browser_column_count;
+our ($config_dir, $config_file);
+read_config_file();
+
+sub read_config_file {
+  my ($attrib, $val);
+  my %config = (
+		search_type => 'verbatim',
+		corpus => 'TLG',
+		language => 'eng',
+		threshold => '30',
+		browser_columns => '3',
+		tlg_dir => '',
+		phi_dir => '',
+		ddp_dir => '',
+	       );
+
+  if ( $ENV{XDG_CONFIG_HOME} ) {
+    $config_dir  = File::Spec->catdir ($ENV{XDG_CONFIG_HOME}, 'Lynkeus');
+    $config_file = File::Spec->catfile($config_dir, 'lynkeus.conf');
+  }
+  elsif ( $ENV{HOME} ) {
+    $config_dir  = File::Spec->catdir ($ENV{HOME}, '.config', 'Lynkeus');
+    $config_file = File::Spec->catfile($config_dir, 'lynkeus.conf');
+  }
+  else {
+    die "Could not find path to configuration file:
+Please set the \$HOME environment variable!";
+  }
+
+  if (-e $config_file ) {
+    say "Found configuration file";
+    # get configuration data
+    open my $fh, '<:utf8', $config_file
+      or die  "Could not open configuration file: $!";
+    while (<$fh>) {
+      next if m/^#/;
+      next if m/^\s*$/;
+      ($attrib, $val) = m#^\s*(\w+)[\s=]+((?:"[^"]*"|[\S]+)+)#;
+      $val =~ s#"([^"]*)"#$1#g;
+      die "Error parsing $config_file for $attrib and $val: $_\n"
+	unless $attrib and defined $val;
+      $attrib =~ s/-?(\w+)/\L$1/;
+      $attrib =~ tr/A-Z/a-z/;
+      die "Configuration file error in parameter: $attrib\n"
+	unless exists $config{$attrib};
+      $config{$attrib} = $val;
+    }
+    close $fh;
+
+    # validate the data
+    warn <<EOT
+Error in configuration file $config_file:
+Search_type must be 'verbatim' or 'lemma[+synonyma][+continentia}!
+Setting search_type to verbatim..."
+EOT
+      unless $config{search_type} =~ /verbatim/
+      or $config{search_type} =~ /lemma/;
+
+    # Check if the paths to the corpora have been specified,
+    # validate the paths and load them into environment variables
+    warn "No path to TLG data specified in $config_file"
+      unless $config{tlg_dir};
+    # die "No path to PHI data specified in $config_file"
+    # 	unless $config{phi_dir};
+    # die "No path to DDP data specified in $config_file"
+    # 	unless $config{ddp_dir};
+    warn "Invalid path to TLG corpus: Could not find authtab.dir!"
+      unless -e File::Spec->catfile($config{tlg_dir}, 'authtab.dir');
+    $ENV{TLG_DIR} = $config{tlg_dir} if $config{tlg_dir};
+    $ENV{PHI_DIR} = $config{tlg_dir} if $config{phi_dir};
+    $ENV{DDP_DIR} = $config{tlg_dir} if $config{ddp_dir};
+  }
+  else {
+    my $diogenes_config_dir = Diogenes::Base->get_user_config_dir();
+    my @diogenes_files = ( File::Spec->catfile($diogenes_config_dir, 'diogenes.prefs'),
+			   File::Spec->catfile($diogenes_config_dir, 'diogenes.config') );
+    my (%diogenes_config, $attrib, $val);
+    for my $rc_file (@diogenes_files) {
+      next unless -e $rc_file;
+      open RC, '<:encoding(UTF-8)', "$rc_file" or die ("Can't open (apparently extant) file $rc_file: $!");
+      while (<RC>) {
+	next if /^#/ or /^\s*$/;
+	($attrib, $val) = m#^\s*(\w+)[\s=]+((?:"[^"]*"|[\S]+)+)#;
+	$val =~ s#"([^"]*)"#$1#g;
+	die "Error parsing $rc_file for $attrib and $val: $_\n" unless 
+	  $attrib and defined $val;
+	$diogenes_config{$attrib} = $val;
+      }
+    }
+    if ( $diogenes_config{tlg_dir} ) {
+      warn "Could not find configuration file:
+Using Diogenes' TLG path instead!";
+      $ENV{TLG_DIR} = $diogenes_config{tlg_dir};
+    }
+    else {
+      warn "No configuration file found";
+      our %languages = find_languages();
+      edit_configuration('startup');
+      exit;
+    }
+  }
+
+  # load data info the defined global configuration variables
+  our $select_st_lemma       = ($config{search_type} =~ /lemma/)       ? 1 : 0;
+  our $select_st_synonyma    = ($config{search_type} =~ /synonyma/)    ? 1 : 0;
+  our $select_st_continentia = ($config{search_type} =~ /continentia/) ? 1 : 0;
+  our $select_si_corpus          = $config{corpus};
+  our $gui_lang                  = $config{language};
+  our $default_threshold_percent = $config{threshold};
+  our $browser_column_count      = $config{browser_columns};
+  $browser_column_count--;
+}
 
 #----------------------------------------------------------------------
 # STARTUP OF THE WORKER PROCESSES
@@ -33,8 +164,9 @@ binmode STDOUT, ':utf8';
 
 our $cores = get_nr_of_cores();
 our (@pid, @from_parent, @from_child, @to_parent, @to_child);
-our $path = File::Spec->catdir
-  ($Bin, '..', 'searches', 'current');
+# our $path = File::Spec->catdir
+#   ($Bin, '..', 'searches', 'current');
+our $path = tempdir( CLEANUP => 1 );
 
 create_worker_processes();
 
@@ -182,6 +314,7 @@ sub corpus_search {
   $data->{hits}            = $query->get_hits();
   $data->{seen_all}        = $query->{seen_all};
   $data->{match_start_all} = $query->{match_start_all};
+  $data->{not_printed}     = $query->{not_printed};
 
   my $filename = File::Spec->catfile("$path", "$word.dat");
   eval {store $data, $filename};
@@ -261,18 +394,6 @@ if ($gentium_availible) {
 }
 
 #----------------------------------------------------------------------
-# Configuration Variables (to be read in form a file!)
-# Search Types
-our $select_st_lemma       = 0;
-our $select_st_synonyma    = 0;
-our $select_st_continentia = 0;
-our $select_si_corpus      = 'TLG';
-
-# Language
-our $gui_lang = 'deu';
-our $default_threshold_percent = 30;
-
-#----------------------------------------------------------------------
 # PERSEUS FILES
 
 # greek-analyses.txt
@@ -338,6 +459,33 @@ sub read_greek_analyses_index {
 #----------------------------------------------------------------------
 # LOCALISATION
 our %ls;				# ls stand for locale string
+our %languages = find_languages();
+
+# Function that gets the availible languages
+sub find_languages {
+  my %lang;
+  eval {
+    my $locale_dir = File::Spec->catdir($Bin, '..', 'data', 'locale');
+    opendir my $dh, $locale_dir
+      or die
+      "I was not able to open directory $locale_dir,
+which should hold the language files: Falling back to English!\n";
+    my @files = readdir $dh;
+
+    for my $file (@files) {
+      next unless $file;
+      next unless $file =~ /^[_a-z]+$/;	# only lowercase ASCII characters or underscores are legal
+      open my $fh, '<:utf8', File::Spec->catfile($locale_dir, $file)
+	or warn "Cannot open locale file $file: $!\n";
+      chomp (my $langname = <$fh>);
+      $lang{$file} = $langname if $langname;
+      close $fh;
+    }
+    closedir $dh;
+  };
+  $lang{eng} = 'English';
+  return %lang;
+}
 
 # Function that sets the locale strings according to the language
 sub gui_lang{
@@ -352,6 +500,15 @@ sub gui_lang{
   $ls{lang}   = 'Language';
   $ls{help}   = 'Help';
 
+  $ls{passage} = 'Passage';
+  $ls{export}    = 'Export';
+  $ls{delete_selection} = 'Delete selection';
+  $ls{undo}   = 'Undo';
+  $ls{show_context} = 'Show context';
+  $ls{export_to_txt} = 'Export as Plain Text File';
+  $ls{export_to_mom} = 'Export as Groff Mom File';
+  $ls{export_to_pdf} = 'Export as PDF Document';
+
   $ls{search_type} = 'Search type';
   $ls{verbatim}    = 'verbatim';
   $ls{lemma}       = 'lemma';
@@ -360,18 +517,21 @@ sub gui_lang{
   $ls{continentia} = 'verba continentia';
   $ls{search_in}   = 'Search in';
 
+  $ls{input}          = 'Input';
   $ls{lemmata}        = 'Lemmata';
   $ls{single_results} = 'Hits for single words';
   $ls{result}         = 'Parallel passages';
   $ls{statistics}     = 'Statistics';
   $ls{cancel}         = 'Cancel';
   $ls{total}          = 'Total';
+  $ls{apply}          = 'Apply';
   $ls{ok}             = 'Ok';
 
   $ls{form}           = 'Form';
   $ls{single_forms}   = 'Forms';
   $ls{pattern}        = 'pattern';
   $ls{pattern_ed}     = 'Pattern Editor';
+  $ls{browser}        = 'Browser';
   $ls{for}            = 'for';
 
   $ls{select_all}     = 'Select all';
@@ -403,6 +563,16 @@ sub gui_lang{
   $ls{preparing}  = 'Preparing';
   $ls{evaluating} = 'Evaluating';
 
+  $ls{new_search}      = 'Neue Suche';
+  $ls{message_discard} = 'Are you sure you want to discard the current search?';
+
+  $ls{path_tlg} = "Path to TLG data";
+  $ls{path_phi} = "Path to PHI data";
+  $ls{path_ddp} = "Path to DDP data";
+  $ls{browse}   = "Browse";
+  $ls{defaults}    = "Default setrings";
+  $ls{browsercols} = "Browser columns";
+
   $ls{error_empty}  = 'Please enter a text!';
   $ls{error_save}   = 'could not save';
   $ls{error_unknown_st} = 'Unknown corpus:';
@@ -411,6 +581,12 @@ sub gui_lang{
   $ls{error_select}  = 'Please select a search term!';
   $ls{error_results}  = 'No results!';
   $ls{error_lemma}  = 'No results for';
+
+  $ls{save_nothing} = 'There is nothing to save!';
+  $ls{save_success} = 'Current serach saved sucessfully!';
+  $ls{save_failure} = 'Could not save current search:';
+  $ls{load_failure} = 'Could not load file:';
+  $ls{load_wrong_format} = 'File has the wrong file format!';
 
   if    ($gui_lang eq 'eng') {  }
   else {
@@ -422,14 +598,12 @@ sub gui_lang{
 	  "I was not able to load the language file $gui_lang: $!\n";
 
       while (<$locale_fh>) {
-	# m/^\s*-?(\w+)\s+=?\s*([^"\n]*)\s*/;
-	# my $key = $1;
-	# my $value = $2;
  	chomp;
 	s/#.*//;
 	s/^\s+//;
 	s/\s+$//;
 	next unless length;
+	next unless /=/;
 
 	my ($key, $value) = split(/\s*=\s*/, $_, 2);
 	$ls{$key} = $value if exists $ls{$key};
@@ -481,20 +655,22 @@ sub import_blacklist{
 #----------------------------------------------------------------------
 
 # our $out_string;
+our $searching = 0;
 our $interrupt = 0;
 our $printer_interrupt = 0;
 our $input_str;
 our @words = ();
-our @undo_words = ();
-our $max_undo_words = 10;
 our %results = ();
 our %output = ();
+our %textframes;
+our %deleted_passages;		# Actual blacklist for passages to be ignored in the evaluation
+our %elided_passages;		# Index of elided ('deleted') passages in the viewers
+our %open_viewers;
 
 our $st_lemma;
 our $st_synonyma;
 our $st_continentia;
 our $si_corpus;
-
 
 our @context_types = qw(character clause sentence line);
 our @context_types_str_sing = split /\s+/, $ls{contexts};
@@ -518,18 +694,11 @@ our $progress_t_frm;
 our $progress_t_bar;
 our $progress_t_l;
 
-# our @progress_core_tlg_l;
-# our @progress_core_pattern_l;
-# our @progress_core_show_bttn;
-# our @progress_core_stop_bttn;
-# our @progress_core_restart_bttn;
 our $progress_w_cnt;
 
 our @selected_str;
 our @selected_num;
 our $weight;
-
-$select_si_corpus = 'Aristoteles';
 
 # Lemma search specific
 our %lemmata;
@@ -537,9 +706,15 @@ our $g_stem_min = 1;
 our $g_max_alt = 50;
 our $g_chop_optional_groups = 0;
 
-# Helper Diogenes Search objects
+# Helper Diogenes Search object
 our $tlg_lister = Diogenes::Search->new(-type => 'tlg', -pattern => ' ');
 
+# Browser
+our $tlg_browser = Diogenes::Browser::Lynkeus->new(-type => 'tlg');
+our (@browser_buffers, @browser_headers, @browser_indices);
+
+# mouse button state (viewer; needed for correct selecting when dragging)
+our $textframe_mouse_pressed;
 #----------------------------------------------------------------------
 # DEFINITION OF THE GUI
 #----------------------------------------------------------------------
@@ -564,9 +739,11 @@ Tkx::option_add("*tearOff", 0);
 our $menu = $mw->new_menu;
 $mw->configure(-menu => $menu);
 
-our $search_m = $menu->new_menu;
-our $pref_m   = $menu->new_menu;
-our $help_m   = $menu->new_menu;
+our $search_m  = $menu->new_menu;
+our $pref_m    = $menu->new_menu;
+our $help_m    = $menu->new_menu;
+our $passage_m = $menu->new_menu;
+our $export_m  = $menu->new_menu;
 
 $menu->add_cascade
   (
@@ -587,25 +764,27 @@ $menu->add_cascade
    -underline => 0,
   );
 
-$search_m->add_command
+$search_m->add_command		# index 0
   (
    -label => $ls{new},
    -underline => 0,
-   -command => sub {   }
+   -command => \&clear_search,
+   -state => 'disabled'
   );
-$search_m->add_command
+$search_m->add_command		# index 1
   (
    -label => $ls{save},
    -underline => 0,
-   -command => sub {   }
+   -command => \&save_to_file,
+   -state => 'disabled'
   );
-$search_m->add_command
+$search_m->add_command		# index 2
   (
    -label => $ls{load},
    -underline => 0,
-   -command => sub {   }
+   -command => \&load_from_file,
   );
-$search_m->add_command
+$search_m->add_command		# index 3
   (
    -label => $ls{quit},
    -underline => 0,
@@ -618,6 +797,13 @@ $pref_m->add_cascade
    -menu => $lang_m,
    -label => $ls{lang},
   );
+$pref_m->add_command
+  (
+   -label => "$ls{pref}...",
+   -underline => 0,
+   -command => \&edit_configuration,
+  );
+
 $lang_m->add_radiobutton
   (
    -label => 'Deutsch',
@@ -634,6 +820,14 @@ $lang_m->add_radiobutton
    -value => 'eng',
    -command => \&update_lang,
   );
+
+sub update_menu {
+  $search_m->entryconfigure(0, -state => 'normal'); # new
+  $searching					    # save
+    ? $search_m->entryconfigure(1, -state => 'disabled')
+    : $search_m->entryconfigure(1, -state => 'normal');
+  $search_m->entryconfigure(2, -state => 'normal'); # load
+}
 
 #------------------------------------------------
 # MAIN FRAME
@@ -763,7 +957,7 @@ $si_cbb->g_bind
   ("<<ComboboxSelected>>", sub { $si_cbb->selection_clear });
 
 our $input_bttn = $input_bttn_frm->new_ttk__button
-  (-text => $ls{search},
+    (-text => $ls{search},
    -command => \&begin_search,
    -default => 'active',
   );
@@ -1089,6 +1283,7 @@ $results_txt = $results_tab2->new_tk__text
    -border => 0,
    -state => 'disabled',
    -spacing3 => 2,
+   -exportselection => 1,
   );
 $results_txt->g_bind('<Configure>', \&update_separator_width);
 # $results_txt->configure(-state => 'disabled');
@@ -1100,8 +1295,6 @@ $results_scroll = $results_tab2->new_ttk__scrollbar
   );
 $results_txt->configure(-yscrollcommand => [$results_scroll, 'set']);
 $results_scroll->g___autoscroll__autoscroll() if $autoscroll;
-
-our (%separators, %textframes);
 
 $results_tab2->g_grid_columnconfigure(0, -weight => 1);
 $results_tab2->g_grid_columnconfigure(1, -weight => 0);
@@ -1221,15 +1414,26 @@ $results_txt->tag_configure
   );
 
 #------------------------------------------------
-# THE MAIN SUBROUTINES
-#------------------------------------------------
-
+# FINISH STARTUP
 
 # $st_rbt_vbt->state('disabled');
 # $st_rbt_lem->state('disabled');
 $st_cbt_syn->state('disabled');
 $st_cbt_cnt->state('disabled');
 
+# Load the first file given on the command line
+if (@ARGV) {
+  my $arg = shift @ARGV;
+  if (-f $arg and $arg =~ /\.lyn$/) {
+    load($arg);
+  }
+  else { error("$ls{load_failure} $arg!") }
+}
+
+
+#------------------------------------------------
+# THE MAIN SUBROUTINES
+#------------------------------------------------
 #------------------------------------------------
 # PART 1: PROCESSING THE INPUT TEXT
 #------------------------------------------------
@@ -1238,6 +1442,7 @@ $st_cbt_cnt->state('disabled');
 # STEP 1: Set up variables and widgets
 
 sub begin_search {
+  $searching = 1; update_menu();
   # Empty search data
   $results_txt->delete('1.0', 'end');
   $results_n->tab('2', -state => 'hidden');
@@ -1245,6 +1450,8 @@ sub begin_search {
   # We need to clear also the other global variables connected with Tab 0
   undef @lemmata_bttn;
   undef $lemmata_continue_bttn;
+  # clear menus associated with $results_txt
+  clear_output_menus();
 
   # get the selection of the search type and corpus
   $st_lemma       = $select_st_lemma;
@@ -1269,6 +1476,9 @@ sub begin_search {
     $results_n->select('1');
   }
   @words = ();
+  %deleted_passages = ();
+  %elided_passages  = ();
+  
 
   $input_bttn->configure
     (
@@ -1279,6 +1489,14 @@ sub begin_search {
   $input_txt->configure(-state => "disabled");
 
   Tkx::after(5, \&get_input)
+}
+
+sub clear_output_menus {
+  if ($menu->index('end') == 4) {
+    $menu->delete(2,3);
+    $passage_m->delete(0,2);
+    $export_m->delete(0,2);
+  }
 }
 
 #------------------------------------------------
@@ -1308,7 +1526,7 @@ sub get_input {
   say "";
 
   # Preprocess words
-  # Remove interpunctation, make all lowercase
+  # Remove interpunctation, make all lowercase beta code
   @input_words =  map
     {
       $_ =~ s/^[(<\[{]//;
@@ -1335,7 +1553,7 @@ sub get_input {
       my $w = $word =~ tr#/\\=()|\*##rd;
       if ( $Collator->eq($w, $_) ) {
 	# Get indices of the word and make it grey
-	my @positions = get_positions($word, \@input_lines);
+	my @positions = get_positions($word, \@input_lines, \$current_line, \$current_line_offset);
 	while (@positions) {
 	  my $line  = shift @positions;
 	  my $begin = shift @positions;
@@ -1509,7 +1727,7 @@ sub make_word_progress_bar {
 
   # contents
   my $total =  $words[$w]{steps};
-  my $word = uc($words[$w]{word});
+  my $word =   $words[$w]{word};
   $words[$w]{progress}{bar} = $words[$w]{progress}{frm}->new_ttk__progressbar
     (
      -orient => 'horizontal',
@@ -1707,7 +1925,7 @@ sub make_word_progress_info_chunk {
 
 sub update_word_progress_bars {
   my $w = shift;
-  my $word = uc($words[$w]{word});
+  my $word = $words[$w]{word};
   my $steps = $words[$w]{steps} || 0;
 
   # sum up the progress of the individual chunks
@@ -1812,6 +2030,7 @@ sub setup_searches {
     $words[$word]{hits}            = 0;
     $words[$word]{seen_all}        = {};
     $words[$word]{match_start_all} = {};
+    $words[$word]{not_printed}     = {};
 
     # delete the restart flag if it was set
     delete $words[$word]{restart} if exists $words[$word]{restart};
@@ -1931,7 +2150,12 @@ sub manage_searches {
     $words[$word]{processing}{$chunk}{total} = @author_nums;
 
     # make process start
-    $to_child[$core]->say($word, '_', $words[$word]{word}, '_', $chunk);
+    my $ascii_word = $words[$word]{word};
+    if ($ascii_word =~ m/[Α-ω]/) {
+      $ascii_word = lc Diogenes::UnicodeInput->unicode_greek_to_beta($ascii_word);
+      $ascii_word =~ tr#/\\|()=\*##d;
+    }
+    $to_child[$core]->say($word, '_', $ascii_word, '_', $chunk);
     $to_child[$core]->say($_) for @patterns;
     $to_child[$core]->say();
     $to_child[$core]->say($type);
@@ -2008,6 +2232,8 @@ sub manage_searches {
 	  values %{ $data->{seen_all} };
 	@{ $words[$word]{match_start_all} }{keys %{ $data->{match_start_all} }} =
 	  values %{ $data->{match_start_all} };
+	@{ $words[$word]{not_printed} }{keys %{ $data->{not_printed} }} =
+	  values %{ $data->{not_printed} };
       }
 
       # GUI postprocessing
@@ -2177,6 +2403,7 @@ sub end_search {
     );
   $input_bttn_text = 'edit';
   $mw->g_bind("<Control-Return>", sub { $results_bttn->invoke() } );
+  $searching = 0; update_menu();
   return 1;
 }
 
@@ -2325,6 +2552,7 @@ sub context_sb_callback {
 
 # The final evaluation
 sub begin_evaluation {
+  $searching = 1; update_menu();
   # Get context values
   return unless $context;
   $context_type = get_context_type();
@@ -2339,8 +2567,13 @@ sub begin_evaluation {
       : $stats_tw->set ( "$word.$i", "weight");
   }
 
-  # Prepare $results_txt, delete old separators
-  $separators{$results_txt} = [];
+  # Prepare $results_txt, delete old separators and delete data
+  $textframes{$results_txt} = [];
+  for my $tag ( split ' ', $results_txt->tag_names() ) {
+    $results_txt->tag_delete("$tag") if
+      $tag =~ /^[ts]\d+/;
+  }
+  delete $elided_passages{$results_txt};
   $results_txt->configure(-state => 'normal');
   $results_txt->delete('1.0', 'end');
   $results_n->tab('2', -state => 'normal');
@@ -2357,9 +2590,20 @@ sub begin_evaluation {
 }
 
 sub populate_results {
-  my $word  = $words[shift];
+  my $w = shift;
+  my $word  = $words[$w];
   my @queue = @_;
   my @tlg_numbers = keys %{ $word->{seen_all} };
+
+  # make the blacklist
+  my %deleted;
+  for my $arrayref (@{ $deleted_passages{$w} }) {
+    my $auth = shift @$arrayref;
+    $auth = 'tlg' . $auth . '.txt';
+    $deleted{$auth}{$_} = 1 for @$arrayref;
+  }
+  say "Blacklist";
+  print Dumper %deleted;
 
   # get the single matches
   for my $tlg_number (@tlg_numbers) {
@@ -2370,6 +2614,8 @@ sub populate_results {
     # make for each hit a hash, pass the needed values from @words,
     # add the data for $match_start
     for my $i (0..$#matches) {
+      # skip deleted matches
+      next if exists $deleted{$tlg_number}{ $matches[$i] };
       # $results{$tlg_number}{$hit} = $word;
       $results{$tlg_number}{$matches[$i]}{word}   = $word->{word};
       $results{$tlg_number}{$matches[$i]}{hits}   = $word->{hits};
@@ -2579,13 +2825,13 @@ sub extract_hits {
 }
 
 sub finish_output {
-  my $printer = shift;
+#  my $printer = shift;
   my $output_string = '';
 
   # sort and concatenate results
   # Get the keys of $results (that is, the tlg file names) into
   # chronological order
-  my @ordered_nums = @{ $printer->{tlg_ordered_authnums} };
+  my @ordered_nums = @{ $tlg_lister->{tlg_ordered_authnums} };
   my @ordered_result_keys = ();
   s/^.*$/tlg$&.txt/ for @ordered_nums;
   for (@ordered_nums) {
@@ -2603,20 +2849,24 @@ sub finish_output {
     }
   }
 
-  my @info;
+  my (@location, @info);
   for my $tlg_number (@ordered_result_keys) {
     for my $match (0..$#{ $output{$tlg_number} }) {
       $output_string .= $output{$tlg_number}[$match]{output};
+      my $number = substr $tlg_number, 3, 4;
+      my %hash = (author => $number,
+		  match  => $output{$tlg_number}[$match]{end_pos}[0]);
+      push @location, \%hash;
       push @info, $output{$tlg_number}[$match]{info};
-      # print_results( \$output_string, $results_txt, \@info );
     }
   }
 
   # delete progress bars
   $progress_frm->g_destroy() if $progress_frm;
+  $searching = 0; update_menu();
 
   if ($output_string) {
-    print_results( \$output_string, $results_txt, \@info );
+    print_results( \$output_string, $results_txt, \@location, \@info );
   }
   else {
     $results_n->tab('2', -state => 'hidden');
@@ -2628,25 +2878,102 @@ sub finish_output {
 
 sub print_results {
   my $output_string = shift;
-  my $output_txt = shift;
-  my $info = shift;
-  $printer_interrupt = 0;
+  my $output_txt    = shift;
+  my $location      = shift;
+  my $info_or_menu  = shift;
+  # viewer_txt has as 4th arg its menu, $results_txt a reference to the @info array
+  my $info;
+  my $output_m = {};
+  # $results_txt
+  if    (ref $info_or_menu eq 'ARRAY') {
+    $info = $info_or_menu;
+    $output_m->{menu} = $menu;
+    $output_m->{passage} = $passage_m;
+    $output_m->{export} = $export_m;
 
-  $separators{$output_txt} = [];
+  }
+  elsif (ref $info_or_menu eq 'Tkx::widget') {
+    $output_m->{menu} = $info_or_menu;
+    $output_m->{passage} = $output_m->{menu}->new_menu;
+    $output_m->{export} = $output_m->{menu}->new_menu;
+  }
+  else {
+    warn "$info_or_menu should be ARRAY or.Tkx::widget, but is",
+      ref $info_or_menu, "!"
+      and return;
+  }
+  $output_m->{menu}->insert
+    (
+     2, 'cascade',
+     -menu      => $output_m->{passage},
+     -label     => $ls{passage},
+     -underline => 0,
+    );
+  $output_m->{menu}->insert
+    (
+     3,'cascade',
+     -menu      => $output_m->{export},
+     -label     => $ls{export},
+     -underline => 0,
+    );
+  $output_m->{passage}->add_command # index 0
+    (
+     -label => "$ls{delete_selection} (DEL)",
+     -underline => 0,
+     -state => 'disabled'
+    );
+  $output_m->{passage}->add_command # index 1
+    (
+     -label => "$ls{undo} (y)",
+     -underline => 0,
+#     -state => 'disabled'
+    );
+  $output_m->{passage}->add_command # index 2
+    (
+     -label => "$ls{show_context} (RET)",
+     -underline => 0,
+     -state => 'disabled'
+    );
+  $output_m->{export}->add_command # index 0
+    (
+     -label => "$ls{export_to_txt} (T)",
+     -underline => 0,
+#     -state => 'disabled'
+    );
+  $output_m->{export}->add_command # index 1
+    (
+     -label => "$ls{export_to_mom} (M)",
+     -underline => 0,
+#     -state => 'disabled'
+    );
+  $output_m->{export}->add_command # index 2
+    (
+     -label => "$ls{export_to_pdf} (P)...",
+     -underline => 0,
+#     -state => 'disabled'
+    );
+
+  $printer_interrupt = 0;
+  $output_txt->g_focus();
+  # $output_txt->g_bindtags(['Text', '.t', 'all', "$output_txt"]);
+
   $textframes{$output_txt} = [];
   my $separator_width = ( $output_txt->g_winfo_width() - 20);
-  my $separator_count = 0;
+  my $textframe_count = 0;
 
   open my $str_fh, '<:utf8', $output_string;
   Tkx::after( 5, [\&print_results_chunk,
-		  $str_fh, $output_txt, $info, $separator_count] );
+		  $str_fh, $output_txt, $location, $info,
+		  $textframe_count, $output_m] );
 }
 
 sub print_results_chunk {
-  my ($str_fh, $output_txt, $info, $separator_count) = @_;
+  my ($str_fh, $output_txt, $location, $info, $textframe_count, $output_m) = @_;
   my $separator_width = ( $output_txt->g_winfo_width() - 20);
   local $/ = '~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~';
+  $output_txt->configure(-state => 'normal');
 
+  my $finished = 0;
   for (my $i = 0; $i < 20; $i++ ) {
     # get line index of the last printed line
     my $start = $output_txt->index('end');
@@ -2656,23 +2983,32 @@ sub print_results_chunk {
     # get data or return
     my $str = <$str_fh>;
     if ($printer_interrupt or not $str) {
-      $output_txt->delete("$start.0", "end");
-      $output_txt->configure(-state => 'disabled');
-      pop  @{ $separators{$output_txt} }; # important for update_separator_width
-      close ($str_fh) and return;
+      # only here can we get the correct ranges for the separator
+      # handler tag, so we have to correct it here!
+      for (0..$textframe_count) {
+	my $sepstart = $textframes{$output_txt}[$_]{separator_start} // next;
+	$output_txt->tag_add("s$_", "$sepstart.0", "$sepstart.0 + 1l");
+      }
+      $finished = 1; last;
     }
 
     # create separator line unless the passage is the first reported
     if ($start > 1) {
-      $separators{$output_txt}[$separator_count] =
+      $textframes{$output_txt}[$textframe_count]{separator} =
 	$output_txt->new_tk__canvas
 	(-width => $separator_width, -height => 1, -bg => 'black');
       $output_txt->window_create
-	("$start.0", -window => $separators{$output_txt}[$separator_count]);
+	("$start.0",
+	 -window => $textframes{$output_txt}[$textframe_count]{separator});
       # the empty canvas with black bg makes for an excellent dividing line
-      $separators{$output_txt}[$separator_count]->create_line
+      $textframes{$output_txt}[$textframe_count]{separator}->create_line
 	(0,0,10000,0, -fill => 'black', -width => 3);
-      $separator_count++;
+      $textframes{$output_txt}[$textframe_count]{separator_start} = $start;
+
+      # handler tags
+      $output_txt->tag_add("s$textframe_count", "$start.0", "$start.end");
+
+      $textframe_count++;
     }
 
     # delete Diogenes' ASCII passage separator, including the \n
@@ -2681,6 +3017,7 @@ sub print_results_chunk {
     #   or next;
 
     # determine end of the header
+    my $header_start = ($start > 1) ? $start + 1 : $start;
     my $header_end = index $str, "\n\n";
 
     # interpolate Lynkeus' info string
@@ -2694,7 +3031,7 @@ sub print_results_chunk {
       $header_end -= 10;
     }
 
-    # replace -> and <- with Tk markings
+    # replace --> and <-- with Tk's markings
     my (@highlight_starts, @highlight_ends);
     my $matchoffset = 0;
     while (0 <= $matchoffset < length($str)) {
@@ -2777,6 +3114,7 @@ sub print_results_chunk {
 
     # insert text
     $output_txt->insert("end", "$str");
+    $output_txt->delete("end-1l", "end");
     # apply markup
     for my $linenum (sort numerically keys %highlights) {
       my $index = $#{ $highlights{$linenum}{start} };
@@ -2788,22 +3126,362 @@ sub print_results_chunk {
 	 "$linenum.$highlights{$linenum}{end}[$_]"
 	) for 0..$index;
     }
-    $output_txt->tag_add("header", "$start.0", "$tk_header_end");
+    $output_txt->tag_add("header", "$header_start.0", "$tk_header_end");
     $output_txt->tag_add("info", "$tk_info_start", "$tk_info_end")
       if $info_start;
+
+    # retrieve and save location information this is buggy, because
+    # the location data structure is not the same as the list of the
+    # printed locations, because of the omission of
+    # {already_reported}. The only possible fix for this is to alter
+    # Diogenes that it makes a special array of all passages PRINTED
+    # and use this information for our purposes! (DONE)
+    $textframes{$output_txt}[$textframe_count]{location} = shift @$location;
+
+    # elide the entry if it was elided in the past
+    if ( exists $textframes{$output_txt}[0]{location}{word} ) {
+      my $word = $textframes{$output_txt}[0]{location}{word};
+      for (@{ $elided_passages{$output_txt}{$word}  }) {
+	if ($_ == $textframe_count) {
+	  $output_txt->tag_configure("t$textframe_count", -elide => 1);
+	  $output_txt->tag_configure("s$textframe_count", -elide => 1);
+	  last;
+	}
+      }
+    }
+    else {
+      for (@{ $elided_passages{$output_txt}{0}  }) {
+	if ($_ == $textframe_count) {
+	  $output_txt->tag_configure("t$textframe_count", -elide => 1);
+	  $output_txt->tag_configure("s$textframe_count", -elide => 1);
+	  last;
+	}
+      }
+    }
+
+    # Textframe callback definitions
+    my ($select, $unselect, $browse, $delete);
+    {
+      my $count = $textframe_count;
+
+      $select = sub {
+	my $bttn = shift;
+	$textframe_mouse_pressed = $bttn if defined $bttn;
+	my @ranges = split /\s+/, $output_txt->tag_ranges("t$count");
+	$output_txt->tag_add("sel", "$ranges[0]", "$ranges[1]");
+	# $output_txt->tag_configure("t$$count", -background => 'green');
+      };
+
+      $unselect = sub {
+	my @ranges = split /\s+/, $output_txt->tag_ranges("t$count");
+	$output_txt->tag_remove("sel", "$ranges[0]", "$ranges[1]")
+	  unless $textframe_mouse_pressed;
+      };
+
+      $browse = sub {
+	# Local version only when nothing is selected
+	return if $output_txt->tag_ranges('sel');
+	my $author = $textframes{$output_txt}[$count]{location}{author};
+	my $offset = $textframes{$output_txt}[$count]{location}{match};
+	invoke_browser($author, $offset);
+      };
+
+      $delete = sub {
+	# Local version only when nothing is selected
+	return if $output_txt->tag_ranges('sel');
+	delete_passage($output_txt, $count);
+      };
+    }
+
+    # add handler tags, activate callbacks
+    $start = ($start == 1) ? 1 : $start + 1;
+    $output_txt->tag_add("t$textframe_count", "$start.0", "end-1l");
+    $output_txt->tag_bind("t$textframe_count", '<Double-ButtonRelease-1>', $select);
+    $output_txt->tag_bind("t$textframe_count", '<Triple-ButtonRelease-1>', $browse);
+    # $output_txt->tag_bind("t$textframe_count", '<Motion>', $select);
+    # $output_txt->tag_bind("t$textframe_count", '<ButtonPress-1>', [$select, 1]);
+    # $output_txt->tag_bind("t$textframe_count", '<ButtonRelease-1>', [$select, 0]);
+    $output_txt->tag_bind("t$textframe_count", '<Return>', $browse);
+    $output_txt->tag_bind("t$textframe_count", '<Delete>', $delete);
   }
-  Tkx::after( 5, [\&print_results_chunk,
-		  $str_fh, $output_txt, $info, $separator_count] );
+
+  # Global callback definitions
+  my ($move_forwards, $move_backwards, $browse, $delete, $undo);
+  my ($export_txt, $export_roff, $export_pdf);
+  # Helper function
+  my $move_update_selection = sub {
+    my ($output_txt, @ranges) = @_;
+    $output_txt->tag_remove("sel", "1.0", "end");
+    $output_txt->tag_add("sel", "$ranges[0]", "$ranges[1]");
+    $output_txt->see("$ranges[1]");
+    $output_txt->see("$ranges[0]");
+  };
+
+  $move_forwards = sub {
+    my @selection = split ' ', $output_txt->tag_ranges('sel');
+    if (@selection) {
+      my $next_textframe;
+      for my $count (0..$textframe_count) {
+	if ( $output_txt->tag_nextrange("t$count", $selection[1]) ) {
+	  # skip over elided passages
+	  next if $output_txt->tag_cget("t$count", '-elide');
+	  my @ranges = split /\s+/, $output_txt->tag_ranges("t$count");
+	  Tkx::after(1, [$move_update_selection, $output_txt, @ranges]);
+	  return;
+	}
+      }
+      # Lest the arrow keys clear the selection
+      Tkx::after(1, [$move_update_selection, $output_txt, @selection]);
+    }
+    else {
+      my ($start, undef) = split ' ', $output_txt->yview(), 2;
+      my ($lastline, undef) = split ' ', $output_txt->index("end"), 2;
+      my $firstline = int( $start * $lastline) + 1;
+      $firstline++;
+      for my $count (reverse 0..$textframe_count) {
+	if ( $output_txt->tag_prevrange("t$count", "$firstline.0") ) {
+	  # skip over elided passages
+	  next if $output_txt->tag_cget("t$count", '-elide');
+	  my @ranges = split /\s+/, $output_txt->tag_ranges("t$count");
+	  Tkx::after(1, [$move_update_selection, $output_txt, @ranges]);
+	  return;
+	}
+      }
+    }
+
+  };
+
+  $move_backwards = sub {
+    my @selection = split ' ', $output_txt->tag_ranges('sel');
+    if (@selection) {
+      for my $count (reverse 0..$textframe_count) {
+	if ( $output_txt->tag_prevrange("t$count", $selection[0]) ) {
+	  # skip over elided passages
+	  next if $output_txt->tag_cget("t$count", '-elide');
+	  my @ranges = split /\s+/, $output_txt->tag_ranges("t$count");
+	  Tkx::after(1, [$move_update_selection, $output_txt, @ranges]);
+	  return;
+	}
+      }
+      # Lest the arrow keys clear the selection
+      Tkx::after(1, [$move_update_selection, $output_txt, @selection]);
+    }
+    else {
+      my ($start, undef) = split ' ', $output_txt->yview(), 2;
+      my ($lastline, undef) = split ' ', $output_txt->index("end"), 2;
+      my $firstline = int( $start * $lastline) + 1;
+      $firstline++;
+      for my $count (reverse 0..$textframe_count) {
+	if ( $output_txt->tag_prevrange("t$count", "$firstline.0") ) {
+	  # skip over elided passages
+	  next if $output_txt->tag_cget("t$count", '-elide');
+	  my @ranges = split /\s+/, $output_txt->tag_ranges("t$count");
+	  Tkx::after(1, [$move_update_selection, $output_txt, @ranges]);
+	  return;
+	}
+      }
+    }
+  };
+
+  $browse = sub {
+    my @selection = split ' ', $output_txt->tag_ranges('sel');
+    return unless @selection;
+    @selection = map { s/^(\d+).*/$1/r } @selection;
+    for my $count (0..$textframe_count) {
+      my @ranges = split ' ', $output_txt->tag_ranges("t$count");
+      @ranges = map { s/^(\d+).*/$1/r } @ranges;
+      if ( $ranges[0] <= $selection[0] <= $ranges[1] ) {
+	my $author = $textframes{$output_txt}[$count]{location}{author};
+	my $offset = $textframes{$output_txt}[$count]{location}{match};
+	invoke_browser($author, $offset);
+	last;
+      }
+    }
+  };
+
+  $delete = sub {
+    my @selection = split ' ', $output_txt->tag_ranges('sel');
+    return unless @selection;
+    @selection = map { s/^(\d+).*/$1/r } @selection;
+    for my $count (0..$textframe_count) {
+      my @ranges = split ' ', $output_txt->tag_ranges("t$count");
+      next unless @ranges;
+      @ranges = map { s/^(\d+).*/$1/r } @ranges;
+      if ( $ranges[0] <= $selection[0] <= $ranges[1] ) {
+	delete_passage($output_txt, $count);
+	if ( $ranges[0] <= $selection[1] <= $ranges[1] ) {
+	  $move_forwards->() and return;
+	}
+	else {
+	  $selection[0] = $ranges[1] + 2;
+	}
+      }
+    }
+  };
+
+  # TODO make undo behave also locally in the actually openened textframe
+  $undo = sub {
+    my $word = ( exists $textframes{$output_txt}[0]{location}{word} )
+      ? pop @{ $elided_passages{$output_txt}{history} }
+      : 0;
+    return unless defined $word;
+
+    my $passage = pop @{ $elided_passages{$output_txt}{$word} };
+    return unless defined $passage;
+
+    $output_txt->tag_configure("t$passage", -elide => 0);
+    $output_txt->tag_configure("s$passage", -elide => 0);
+    print STDERR Dumper %elided_passages;
+    # $results_txt: return
+    return unless exists $textframes{$output_txt}[0]{location}{word};
+
+    # $viewer text: undo the last edit of the blacklist.
+    pop @{ $deleted_passages{$word} };
+    my $blacklisted = @{ $deleted_passages{$word} };
+    say "Word $word, $blacklisted";
+    update_stats_tw_num($word, $blacklisted);
+
+    print STDERR Dumper %deleted_passages;
+  };
+
+  $export_txt = sub {
+    return unless my $filename = Tkx::tk___getSaveFile
+    (
+     -parent => $output_txt,
+     -initialdir => '~',
+     -defaultextension => '.txt',
+     -filetypes => [
+		    ['Plain Text', ['.txt']]
+		   ],
+    );
+    my $output = export_to_text($output_txt);
+
+    open my $fh, '>:utf8', $filename
+      or die "Could not open $filename: $!";
+    print { $fh } $output;
+    close $fh;
+  };
+
+  $export_roff = sub {
+    return unless my $filename = Tkx::tk___getSaveFile
+    (
+     -parent => $output_txt,
+     -initialdir => '~',
+     -defaultextension => '.mom',
+     -filetypes => [
+		    ['Roff Mom', ['.mom']]
+		   ],
+    );
+    my $output = export_to_mom($output_txt);
+
+    open my $fh, '>:utf8', $filename
+      or die "Could not open $filename: $!";
+    print { $fh } $output;
+    close $fh;
+  };
+
+  $export_pdf = sub {
+    return unless my $filename = Tkx::tk___getSaveFile
+    (
+     -parent => $output_txt,
+     -initialdir => '~',
+     -defaultextension => '.pdf',
+     -filetypes => [ ['PDF', ['.pdf']] ],
+    );
+    my $output = export_to_mom($output_txt);
+    open my $fh, '|-:utf8', "groff -mmom -Kutf8 -Tpdf -t > $filename"
+      or die "Could not pipe to groff: $!";
+    print { $fh } $output;
+    close $fh;
+  };
+
+  $output_txt->g_bind('<y>', $undo);
+  $output_txt->g_bind('<n>', $move_forwards);
+  $output_txt->g_bind('<p>', $move_backwards);
+  $output_txt->g_bind('<Up>',   $move_backwards);
+  $output_txt->g_bind('<Down>', $move_forwards);
+  $output_txt->g_bind('<Return>', $browse);
+  $output_txt->g_bind('<Delete>', $delete);
+  $output_txt->g_bind('<T>', $export_txt);
+  $output_txt->g_bind('<M>', $export_roff);
+  $output_txt->g_bind('<P>', $export_pdf);
+  $output_m->{passage}->entryconfigure(0, -command => $delete);
+  $output_m->{passage}->entryconfigure(1, -command => $undo);
+  $output_m->{passage}->entryconfigure(2, -command => $browse);
+  $output_m->{export}->entryconfigure(0, -command => $export_txt);
+  $output_m->{export}->entryconfigure(1, -command => $export_roff);
+  $output_m->{export}->entryconfigure(2, -command => $export_pdf);
+  my $selectionhandler = sub {
+    if ( $output_txt->tag_ranges('sel') ) {
+      $output_m->{passage}->entryconfigure($_, -state => 'normal') for 0, 2;
+    }
+    else {
+      $output_m->{passage}->entryconfigure($_, -state => 'disabled') for 0, 2;
+    }
+  };
+  $output_txt->g_bind('<<Selection>>', $selectionhandler);
+
+  $output_txt->configure(-state => 'disabled');
+  unless ($finished) {
+    Tkx::after( 5, [\&print_results_chunk,
+		    $str_fh, $output_txt, $location, $info,
+		    $textframe_count, $output_m] );
+  }
+  else {
+    close ($str_fh);
+  }
+}
+
+sub delete_passage {
+  my $output_txt = shift;
+  my $count = shift;
+
+  $output_txt->tag_configure("t$count", -elide => 1);
+  $output_txt->tag_configure("s$count", -elide => 1);
+  unless ( exists $textframes{$output_txt}[0]{location}{word} ) {
+    # $results_txt
+    push @{ $elided_passages{$output_txt}{0}  }, $count;
+    return;
+  }
+  else {
+    # $viewer_txt: push our passages to the blacklist stash
+    my $word = $textframes{$output_txt}[$count]{location}{word};
+    push @{ $elided_passages{$output_txt}{$word}   }, $count;
+    push @{ $elided_passages{$output_txt}{history} }, $word;
+    # history is needed for undoing the propper word in a
+    # multiword $viewer_txt
+
+    my $auth = $textframes{$output_txt}[$count]{location}{author};
+    my @locations = ( $auth,
+		      $textframes{$output_txt}[$count]{location}{match} );
+    push @locations,
+      @{ $textframes{$output_txt}[$count]{location}{not_printed} }
+      if exists $textframes{$output_txt}[$count]{location}{not_printed};
+    push @{ $deleted_passages{$word} }, \@locations;
+    my $blacklisted = @{ $deleted_passages{$word} };
+    update_stats_tw_num($word, $blacklisted);
+
+    print STDERR Dumper %deleted_passages;
+  }
 }
 
 sub update_separator_width {
-  for my $txt (keys %separators){
+  for my $txt (keys %textframes){
     Tkx::update();
     my $output_width = ( Tkx::winfo_width($txt) - 20);
-    for my $separator ( @{ $separators{$txt} } ){
-      $separator->configure(-width => $output_width) if $separator;
+    for my $item ( @{ $textframes{$txt} } ){
+      $item->{separator}->configure(-width => $output_width)
+	if $item->{separator};
     }
   }
+}
+
+sub update_stats_tw_num {
+  my $index = shift;
+  my $blacklisted = shift // 0;
+  my $word = $words[$index]{word};
+  my $hits = $words[$index]{hits} - $blacklisted;
+  $stats_tw->set("$word.$index", hits => $hits);
 }
 
 #------------------------------------------------
@@ -2887,7 +3565,7 @@ sub setup_lemma {
 
   my $word = $words[$i]{word};
 
-  # Get analyses, error.message and next @word if analysis fails
+  # Get analyses, errormessage and next @word if analysis fails
   my %analyses = get_lemma($word);
   unless (keys %analyses) {
     error( $ls{error_lemma}, " $word!" );
@@ -2900,42 +3578,44 @@ sub setup_lemma {
 
   # Headword combobox
   my @headwords = sort keys %analyses;
-  $words[$i]{headword} = $headwords[0];
-  $headword_cbb_callback[$i] = make_headwords_callback($i);
   $headword_cbb[$i] = $lemmata_frm->new_ttk__combobox
     (
-     -textvariable => \$words[$i]{headword},
+    # -textvariable => \$words[$i]{headword},
      -values => \@headwords,
      -state => 'readonly'
     );
+  $words[$i]{headword} = $headwords[0];
+  $headword_cbb[$i]->set( $words[$i]{headword} );
   $headword_cbb[$i]->g_bind
     ("<<ComboboxSelected>>",
-     sub { $headword_cbb_callback[$i]($words[$i]{headword}) });
+     sub { headwords_callback($i) } );
   unless ($#headwords){   # disable the widget if there is no choice
     $headword_cbb[$i]->state('disabled');
   }
 
   # Lemmata combobox
   my @lemmata = sort keys %{ $analyses{$headwords[0]} };
-  $words[$i]{lemma} = $lemmata[0];
   $lemmata_cbb[$i] = $lemmata_frm->new_ttk__combobox
     (
-     -textvariable => \$words[$i]{lemma},
      -values => \@lemmata,
      -state => 'readonly'
     );
+  $words[$i]{lemma} = $lemmata[0];
+  $lemmata_cbb[$i]->set( $words[$i]{lemma} );
   $lemmata_cbb[$i]->g_bind
-    ("<<ComboboxSelected>>", sub { $lemmata_cbb[$i]->selection_clear });
+    ("<<ComboboxSelected>>",
+     sub { $words[$i]{lemma} = $lemmata_cbb[$i]->get();
+	   $lemmata_cbb[$i]->selection_clear
+	 });
   unless ($#lemmata){		# disable the widget if there is no choice
     $lemmata_cbb[$i]->state('disabled');
   }
 
   # Show single forms button
-  $lemmata_bttn_callback[$i] = make_show_bttn_callback($i);
   $lemmata_bttn[$i] = $lemmata_frm->new_ttk__button
     (
      -text => "$ls{single_forms}...",
-     -command => \&{ $lemmata_bttn_callback[$i] },
+     -command => sub { show_single_forms($i) },
      );
 
   # Geometry
@@ -2944,18 +3624,32 @@ sub setup_lemma {
   $lemmata_cbb[$i] ->g_grid(-column => 1, -row => $row, -sticky => 'ew', -padx => '4 4', -pady => '0 5');
   $lemmata_bttn[$i]->g_grid(-column => 2, -row => $row, -sticky => 'ew', -padx => '4 10', -pady => '0 5');
 
-  say $words[$i]{headword};
-  say $words[$i]{lemma};
-  say $analyses{$words[$i]{headword}}{$words[$i]{lemma}}{number};
+  # say $words[$i]{headword};
+  # say $words[$i]{lemma};
+  # say $analyses{$words[$i]{headword}}{$words[$i]{lemma}}{number};
 
   if ($i == $#words) { Tkx::after( 10, [\&finish_setup_lemma, ($i+1) ] ); }
   else               { Tkx::after( 10, [\&setup_lemma, $i ]); }
 }
 
-sub make_show_bttn_callback {
-  my $i = shift;
-  return sub { show_single_forms($i) }
+sub headwords_callback {
+  say my $i = shift;
+  say my $headword = $words[$i]{headword} = $headword_cbb[$i]->get();
+  say my @lemmata = sort keys %{ $words[$i]{analyses}{$headword} };
+
+  my $lemma = $words[$i]{lemma} = $lemmata[0];
+  $lemmata_cbb[$i]->set($lemma);
+  $lemmata_cbb[$i]->configure
+    (-values => \@lemmata);
+  $headword_cbb[$i]->selection_clear;
+  if ($#lemmata){
+    $lemmata_cbb[$i]->state('!disabled')
+  }
+  else {
+    $lemmata_cbb[$i]->state('disabled')
+  }
 }
+
 sub show_single_forms {
   my $i = shift;
   my $word = $words[$i]{word};
@@ -3109,31 +3803,6 @@ sub show_single_forms {
 	  -width => $forms_cvs->g_winfo_width(),
 	 );
      });
-}
-
-sub make_headwords_callback {
-  my $i = shift;
-  # my $headword = shift;
-  # my $headword = $$headword_ref;
-  return sub {
-    my $headword = shift;
-    headwords_callback($i, $headword);
-  }
-}
-sub headwords_callback {
-  say my $i = shift;
-  say my $headword = shift;
-  say my @lemmata = sort keys %{ $words[$i]{analyses}{$headword} };
-  $words[$i]{lemma} = $lemmata[0];
-  $lemmata_cbb[$i]->configure
-    (-values => \@lemmata);
-  $headword_cbb[$i]->selection_clear;
-  if ($#lemmata){
-    $lemmata_cbb[$i]->state('!disabled')
-  }
-  else {
-    $lemmata_cbb[$i]->state('disabled')
-  }
 }
 
 sub get_lemma {
@@ -3290,10 +3959,11 @@ sub retrieve_forms {
   Tkx::after( 10, \&finish_lemma_setup ) and return if $i > $#words;
 
   # get the forms, remove the forms found on the word's forms_blacklist
+  my $lemma = $words[$i]{lemma};
   my @forms = get_forms($i);
   my @indices =
     grep {
-      ! $lemmata{ $words[$i]{lemma} }{forms_blacklist}[$_]
+      ! $lemmata{$lemma}{forms_blacklist}[$_]
     } 0..$#forms;
   @forms = @forms[@indices];
 
@@ -3310,8 +3980,9 @@ sub get_forms {
   my $i = shift;
 
   my $headword = $words[$i]{headword};
-  my $lemma = $words[$i]{lemma};
-  my $number = $words[$i]{analyses}{$headword}{$lemma}{number};
+  my $lemma    = $words[$i]{lemma};
+  my $number   = $words[$i]{analyses}{$headword}{$lemma}{number};
+  die "I is $i" unless defined $number;
 
   # my $headword = $words[$i]{headword};
   # my $lemma    = $words[$i]{lemma};
@@ -3542,6 +4213,9 @@ sub make_lemma_patterns {
 # STEP 5: Finish the setup
 
 sub finish_lemma_setup {
+  $lemmata_cvs->g_destroy() and undef $lemmata_cvs;
+  # $_->g_destroy() for @lemmata_cbb;
+  # $_->g_destroy() for @headword_cbb;
   $results_n->tab('0', -state => 'hidden');
   $results_n->tab('1', -state => 'normal');
   $results_n->select('1');
@@ -3552,7 +4226,267 @@ sub finish_lemma_setup {
 #------------------------------------------------
 # PART 4: SUBWINDOWING FUNCTIONS
 #------------------------------------------------
+# PREFERENCES
+#------------------------------------------------
+sub edit_configuration {
+  my $arg = shift;		# simple switch
+  my $cfg = ( $arg )
+    ? Tkx::widget->new ( '.', -padx => 5, -pady => 5 )
+    : $mw->new_toplevel(      -padx => 5, -pady => 5 );
+
+  $cfg->g_wm_title('Lynkeus Configuration');
+  if ($arg) {
+    my $icon_path = File::Spec->catdir($Bin, '..', 'data', 'icon.png');
+    Tkx::image_create_photo( "icon", -file => $icon_path);
+
+    $ls{path_tlg} = "Path to TLG data";
+    $ls{path_phi} = "Path to PHI data";
+    $ls{path_ddp} = "Path to DDP data";
+    $ls{browse}   = "Browse";
+    $ls{defaults}    = "Default setrings";
+    $ls{browsercols} = "Browser columns";
+
+    $ls{search_type} = 'Search type';
+    $ls{verbatim}    = 'verbatim';
+    $ls{lemma}       = 'lemma';
+    $ls{synonyma}    = 'verba synonyma';
+    $ls{continentia} = 'verba continentia';
+    $ls{search_in}   = 'Search in';
+
+    $ls{threshold} = 'Threshold';
+    $ls{lang}      = 'Language';
+
+    $ls{cancel}         = 'Cancel';
+    $ls{apply}          = 'Apply';
+    $ls{ok}             = 'Ok';
+  }
+  $cfg->g_wm_iconphoto('icon');
+
+  # Paths to the corpora
+  my $cfg_path = $cfg->new_ttk__frame();
+  my $tlgpath = ( exists $ENV{TLG_DIR} ) ? $ENV{TLG_DIR} : '';
+  my $phipath = ( exists $ENV{PHI_DIR} ) ? $ENV{PHI_DIR} : '';
+  my $ddppath = ( exists $ENV{DDP_DIR} ) ? $ENV{DDP_DIR} : '';
+  my $findpath = sub {
+    my $corpus = shift;
+    my $pathref = shift;
+    my $initialdir = (-d $$pathref) ? $$pathref : '';
+    my $path = Tkx::tk___chooseDirectory
+      (-initialdir => $initialdir,
+       -parent => $cfg,
+      );
+    $$pathref = $path if $path;
+  };
+  my $tlgpath_l = $cfg_path->new_ttk__label(-text => "$ls{path_tlg}:");
+  my $tlgpath_e = $cfg_path->new_ttk__entry(-textvariable => \$tlgpath, -state => 'normal');
+  my $tlgpath_b = $cfg_path->new_ttk__button
+    (-text => "$ls{browse}...", -command => [$findpath, 'tlg', \$tlgpath]);
+  my $phipath_l = $cfg_path->new_ttk__label(-text => "$ls{path_phi}:");
+  my $phipath_e = $cfg_path->new_ttk__entry(-textvariable => \$phipath);
+  my $phipath_b = $cfg_path->new_ttk__button
+    (-text => "$ls{browse}...", -command => [$findpath, 'phi', \$phipath]);
+  my $ddppath_l = $cfg_path->new_ttk__label(-text => "$ls{path_ddp}:");
+  my $ddppath_e = $cfg_path->new_ttk__entry(-textvariable => \$ddppath);
+  my $ddppath_b = $cfg_path->new_ttk__button
+    (-text => "$ls{browse}...", -command => [$findpath, 'ddp', \$ddppath]);
+
+  # Default search mode
+  my $cfg_settings = $cfg->new_ttk__labelframe(-text => $ls{defaults});
+  my $search_var = ($arg or not $select_st_lemma) ? 'verbatim' : 'lemma';
+  my $search_l = $cfg_settings->new_ttk__label(-text => "$ls{search_type}:");
+  my $search_cbb = $cfg_settings->new_ttk__combobox
+  (
+   -textvariable => \$search_var,
+   -values => [ 'verbatim', 'lemma' ],
+  );
+  $search_cbb->state('readonly');
+  $search_cbb->g_bind("<<ComboboxSelected>>", sub { $search_cbb->selection_clear });
+
+  my $synonyma = ($arg or not $select_st_synonyma) ? 0 : 1;
+  my $synonyma_cbtn = $cfg_settings->new_ttk__checkbutton
+    (-text => $ls{synonyma},
+     -variable => \$synonyma,
+     -onvalue => 1, -offvalue => 0);
+  my $continentia = ($arg or not $select_st_continentia) ? 0 : 1;
+  my $continentia_cbtn = $cfg_settings->new_ttk__checkbutton
+    (-text => $ls{continentia},
+     -variable => \$continentia,
+     -onvalue => 1, -offvalue => 0);
+  $synonyma_cbtn->state   ('disabled');
+  $continentia_cbtn->state('disabled');
+
+  # Default search  corpus
+  my $corpus_var = 'TLG';
+  my $corpus_l = $cfg_settings->new_ttk__label(-text => "$ls{search_in}:");
+  my $corpus_cbb = $cfg_settings->new_ttk__combobox
+  (
+   -textvariable => \$corpus_var,
+   -values => [ 'TLG' ],
+  );
+  $corpus_cbb->state('readonly');
+  $corpus_cbb->g_bind("<<ComboboxSelected>>", sub { $corpus_cbb->selection_clear });
+
+  # Default threshold
+  my $thresh  = ($arg) ? 30 : $default_threshold_percent;
+  my $threshold_l  = $cfg_settings->new_ttk__label(-text => "$ls{threshold} (%):");
+  my $threshold_sb = $cfg_settings->new_ttk__spinbox
+  (
+   -from => 1.0,
+   -to   => 100.0,
+   -textvariable => \$thresh,
+   -state => 'normal',
+   -width => 4,
+   -validate => 'all',
+   -validatecommand => [ \&is_numeric, Tkx::Ev('%P')]
+  );
+
+  # GUI Language
+  if ($arg) { my %languages = find_languages() }
+  my %lang = reverse %languages;
+  my $selected_language = ($arg) ? $languages{eng} : $languages{$gui_lang};
+  my $lang_l = $cfg_settings->new_ttk__label(-text => "$ls{lang}:");
+  my $lang_cbb = $cfg_settings->new_ttk__combobox
+  (
+   -textvariable => \$selected_language,
+   -values => [ keys %lang ],
+  );
+  $lang_cbb->state('readonly');
+  $lang_cbb->g_bind("<<ComboboxSelected>>", sub { $lang_cbb->selection_clear });
+
+  # Browser columns
+  my $browsercolumns = ($arg) ? 2 : $browser_column_count + 1;
+  my $browsercolumns_l  = $cfg_settings->new_ttk__label(-text => "$ls{browsercols}:");
+  my $browsercolumns_sb = $cfg_settings->new_ttk__spinbox
+  (
+   -from => 1,
+   -to   => 100,
+   -textvariable => \$browsercolumns,
+   -state => 'normal',
+   -width => 4,
+   -validate => 'all',
+   -validatecommand => [ \&is_integer, Tkx::Ev('%P')]
+  );
+
+  # Buttons
+  my $cfg_buttons = $cfg->new_ttk__frame();
+  my $cancel_cfg = sub {
+    $cfg->g_destroy();
+  };
+  my $apply_cfg = sub {
+    Tkx::after( 5, [\&error, $cfg,  "No valid path to the TLG data specified!"] )
+      and return
+      unless -e File::Spec->catfile($tlgpath, "authtab.dir");
+    my $searchtype = "$search_var";
+    $searchtype .= "+synonyma"    if $synonyma;
+    $searchtype .= "+continentia" if $continentia;
+    $searchtype = '' if $searchtype eq 'verbatim';
+    my $corpus = $corpus_var;
+    $corpus = '' if $corpus eq 'TLG';
+    my $lang = $lang{$selected_language};
+    $lang = '' if $lang eq 'eng';
+    $thresh = '' if $thresh == 30;;
+    $browsercolumns = '' if $browsercolumns == 2;
+
+    mkdir $config_dir unless -d $config_dir;
+    open my $config_fh, '>:utf8', $config_file
+      or die "Cannot open config file $config_file: $!";
+    say { $config_fh } 'tlg_dir "', $tlgpath, '"';
+    say { $config_fh } 'phi_dir "', $phipath, '"' if $phipath;
+    say { $config_fh } 'ddp_dir "', $ddppath, '"' if $ddppath;
+    say { $config_fh } "language $lang" if $lang;
+    say { $config_fh } "search_type $searchtype" if $searchtype;
+    say { $config_fh } "corpus $corpus" if $corpus;
+    say { $config_fh } "corpus $corpus" if $corpus;
+    say { $config_fh } "threshold $thresh" if $thresh;
+    say { $config_fh } "browser_columns $browsercolumns" if $browsercolumns;;
+    $cfg->g_destroy();
+    if ($arg) {			# Restart Lynkeus
+      exec "perl", File::Spec->catfile($Bin, $0);
+    }
+    else {
+      $select_st_lemma       = ($searchtype =~ /lemma/)       ? 1 : 0;
+      $select_st_synonyma    = ($searchtype =~ /synonyma/)    ? 1 : 0;
+      $select_st_continentia = ($searchtype =~ /continentia/) ? 1 : 0;
+      $select_si_corpus          = $corpus         if $corpus;
+      $gui_lang                  = $lang           if $lang;
+      $default_threshold_percent = $thresh         if $thresh;
+      $browser_column_count    = --$browsercolumns if $browsercolumns;
+    }
+  };
+  my $cfg_cancel_bttn = $cfg_buttons->new_ttk__button
+    (-text => $ls{cancel},
+     -command => $cancel_cfg
+    );
+  my $cfg_bttn = $cfg_buttons->new_ttk__button
+    (-text => $ls{apply},
+     -command => $apply_cfg
+    );
+
+  # GRID: Windows
+  $cfg->g_grid_columnconfigure(0, -weight => 1);
+  $cfg->g_grid_rowconfigure   (0, -weight => 1);
+  $cfg->g_grid_rowconfigure   (1, -weight => 1);
+  $cfg->g_grid_rowconfigure   (2, -weight => 1);
+  $cfg_path->g_grid    (-column => 0, -row => 0, -padx => '5 5', -pady => '5 5', -sticky => "nwes");
+  $cfg_settings->g_grid(-column => 0, -row => 1, -padx => '5 5', -pady => '5 5', -sticky => "nwes");
+  $cfg_buttons->g_grid (-column => 0, -row => 2, -padx => '5 5', -pady => '5 5', -sticky => "nwes");
+
+  # Path
+  $cfg_path->g_grid_columnconfigure(0, -weight => 0);
+  $cfg_path->g_grid_columnconfigure(1, -weight => 1);
+  $cfg_path->g_grid_columnconfigure(2, -weight => 0);
+  $cfg_path->g_grid_rowconfigure   (0, -weight => 1);
+  $cfg_path->g_grid_rowconfigure   (1, -weight => 1);
+  $cfg_path->g_grid_rowconfigure   (2, -weight => 1);
+  $tlgpath_l->g_grid(-column => 0, -row => 0, -padx => '5 5', -pady => '2 2',  -sticky => "nsw");
+  $tlgpath_e->g_grid(-column => 1, -row => 0, -padx => '5 5', -pady => '2 2', -sticky => "nswe");
+  $tlgpath_b->g_grid(-column => 2, -row => 0, -padx => '5 5', -pady => '2 2', -sticky => "nse");
+  $phipath_l->g_grid(-column => 0, -row => 1, -padx => '5 5', -pady => '2 2', -sticky => "nsw");
+  $phipath_e->g_grid(-column => 1, -row => 1, -padx => '5 5', -pady => '2 2', -sticky => "nswe");
+  $phipath_b->g_grid(-column => 2, -row => 1, -padx => '5 5', -pady => '2 2', -sticky => "nse");
+  $ddppath_l->g_grid(-column => 0, -row => 2, -padx => '5 5', -pady => '2 2', -sticky => "nsw");
+  $ddppath_e->g_grid(-column => 1, -row => 2, -padx => '5 5', -pady => '2 2', -sticky => "nswe");
+  $ddppath_b->g_grid(-column => 2, -row => 2, -padx => '5 5', -pady => '2 2', -sticky => "nse");
+
+  # Settings
+  $cfg_settings->g_grid_columnconfigure(0, -weight => 1);
+  $cfg_settings->g_grid_columnconfigure(1, -weight => 1);
+  $cfg_settings->g_grid_columnconfigure(2, -weight => 1);
+  $cfg_settings->g_grid_columnconfigure(3, -weight => 1);
+  $cfg_settings->g_grid_rowconfigure   (0, -weight => 1);
+  $cfg_settings->g_grid_rowconfigure   (1, -weight => 1);
+  $cfg_settings->g_grid_rowconfigure   (2, -weight => 1);
+  $search_l->g_grid         (-column => 0, -row => 0, -padx => '5 5', -pady => '5 5', -sticky => 'nwes');
+  $search_cbb->g_grid       (-column => 1, -row => 0, -padx => '5 5', -pady => '5 5', -sticky => 'nwes');
+  $synonyma_cbtn->g_grid    (-column => 2, -row => 0, -padx => '5 5', -pady => '5 5', -sticky => 'nwes');
+  $continentia_cbtn->g_grid (-column => 3, -row => 0, -padx => '5 5', -pady => '5 5', -sticky => 'nwes');
+  $corpus_l->g_grid         (-column => 0, -row => 1, -padx => '5 5', -pady => '5 5', -sticky => 'nwes');
+  $corpus_cbb->g_grid       (-column => 1, -row => 1, -padx => '5 5', -pady => '5 5', -sticky => 'nwes');
+  $threshold_l->g_grid      (-column => 2, -row => 1, -padx => '5 5', -pady => '5 5', -sticky => 'nwes');
+  $threshold_sb->g_grid     (-column => 3, -row => 1, -padx => '5 5', -pady => '5 5', -sticky => 'nwes');
+  $lang_l->g_grid           (-column => 0, -row => 2, -padx => '5 5', -pady => '8 5', -sticky => 'nwes');
+  $lang_cbb->g_grid         (-column => 1, -row => 2, -padx => '5 5', -pady => '8 5', -sticky => 'nwes');
+  $browsercolumns_l->g_grid (-column => 2, -row => 2, -padx => '5 5', -pady => '8 5', -sticky => 'nwes');
+  $browsercolumns_sb->g_grid(-column => 3, -row => 2, -padx => '5 5', -pady => '8 5', -sticky => 'nwes');
+
+  # Buttons
+  $cfg_buttons->g_grid_columnconfigure(0, -weight => 1);
+  $cfg_buttons->g_grid_columnconfigure(1, -weight => 1);
+  $cfg_buttons->g_grid_rowconfigure   (0, -weight => 1);
+  $cfg_cancel_bttn->g_grid(-column => 0, -row => 0, -pady => '5 5', -padx => '5 5', -sticky => 'nwes');
+  $cfg_bttn->g_grid       (-column => 1, -row => 0, -pady => '5 5', -padx => '5 5', -sticky => 'nwes');
+
+  # Destroy window properly
+  $cfg->g_wm_protocol("WM_DELETE_WINDOW" => $cancel_cfg);
+
+  if ($arg) {
+    Tkx::MainLoop();
+  }
+}
+#------------------------------------------------
 # VIEW SINGLE RESULTS
+#------------------------------------------------
+
 sub view_single_results {
   # get currently selected entrie(s)
   get_selection();
@@ -3568,6 +4502,9 @@ sub view_single_results {
   $viewer->g_wm_title($ls{single_results});
   $viewer->g_wm_iconphoto('icon');
 
+  my $viewer_m = $viewer->new_menu();
+  $viewer->configure(-menu => $viewer_m);
+
   my $viewer_txt = $viewer->new_tk__text
   (
    -width  => 62,
@@ -3579,7 +4516,9 @@ sub view_single_results {
    #  -bg     => 'gray85',
    -border => 0,
    -spacing3 => 2,
+   -exportselection => 1,
   );
+  $open_viewers{$viewer_txt} = [ @selected_num ];
   my $viewer_scroll = $viewer->new_ttk__scrollbar
   (
    -orient => 'vertical',
@@ -3590,7 +4529,8 @@ sub view_single_results {
 
   my $destroy_viewer = sub {
     $printer_interrupt = 1;
-    Tkx::after( 30, sub { delete $separators{$viewer_txt};
+    Tkx::after( 30, sub { delete $textframes{$viewer_txt};
+			  delete $open_viewers{$viewer_txt};
 			  $printer_interrupt = 0;
 			  $viewer->g_destroy();
 			} );
@@ -3632,15 +4572,50 @@ sub view_single_results {
 
   $viewer_txt->g_bind('<Configure>', \&update_separator_width);
 
+  # clear old data
+  for my $tag ( split ' ', $viewer_txt->tag_names() ) {
+    $viewer_txt->tag_delete("$tag") if
+      $tag =~ /^[ts]\d+/;
+  }
+
   # insert the contents
   my $output_str = '';
+  my @location;
+  # get the tlg numbers in chronological order
+  my @ordered_nums = @{ $tlg_lister->{tlg_ordered_authnums} };
+  s/^.*$/tlg$&.txt/ for @ordered_nums;
+
   for my $index (@selected_num) {
+    my @ordered_result_keys = ();
+    for (@ordered_nums) {
+      push @ordered_result_keys, $_ if exists $words[$index]{seen_all}{$_} ;
+    }
+    for my $tlg_number (@ordered_result_keys) {
+      my $number = substr $tlg_number, 3, 4;
+      for my $match ( @{ $words[$index]{seen_all}{$tlg_number} }  ) {
+	# print skipped by Diogenes should be remembered so that the
+	# can properly deleted in the GUI
+	if ( exists $words[$index]{not_printed}{$tlg_number}{$match} ) {
+	  push @{ $location[-1]{not_printed} }, $match;
+	  next;
+	}
+	my %hash =
+	  (author => $number,
+	   match  => $match,
+	   word   => $index,
+	  );
+	push @location, \%hash;
+      }
+    }
     $output_str .= ${$words[$index]{result}}
   }
-  print_results(\$output_str, $viewer_txt);
+  print_results(\$output_str, $viewer_txt, \@location, $viewer_m);
 }
 
+#------------------------------------------------
 # PATTERN EDITOR
+#------------------------------------------------
+
 sub edit_patterns {
   my $w = shift;
   return if exists $words[$w]{pattern_ed};
@@ -3794,9 +4769,897 @@ sub edit_patterns {
   $pattern_ed_txt->configure(-state => 'disabled');
 }
 
+#------------------------------------------------
+# BROWSER
+#------------------------------------------------
+
+sub invoke_browser {
+  my $auth   = shift;
+  my $offset = shift;
+  my $browser_w = $mw->new_toplevel
+    (
+     -padx => 5,
+     -pady => 5,
+    );
+  $browser_w->g_wm_title($ls{browser});
+  $browser_w->g_wm_iconphoto('icon');
+
+  # MAIN FRAME
+  my $browser_frm = $browser_w->new_tk__frame
+    (
+     -background => 'white'
+     # -padding => "12 12 12 12",
+    );
+
+  $browser_w->g_grid_columnconfigure(0, -weight => 1);
+  $browser_w->g_grid_rowconfigure   (0, -weight => 1);
+
+  $browser_frm->g_grid (-column => 0, -row => 0, -sticky => "nwes");
+
+  $browser_frm->g_grid_rowconfigure   (0, -weight => 0);
+  $browser_frm->g_grid_rowconfigure   (1, -weight => 1);
+  $browser_frm->g_grid_rowconfigure   (1, -weight => 0);
+
+  my $header_txt = $browser_frm->new_tk__text
+    (
+     #    -width  => 70,
+     -height => 4,
+     -font   => 'TkCaptionFont',
+     # -padx   => 5,
+     # -pady   => 5,
+     -wrap   => 'word',
+     #  -bg     => 'gray85',
+     -borderwidth => 20,
+     -relief => 'flat',
+     -spacing3 => 2,
+     -insertborderwidth => 0,
+     -highlightthickness => 0,
+    );
+  $header_txt->tag_configure
+    ("header",
+     -foreground => '#3E7804',
+     -justify => "center",
+    );
+
+  $header_txt->g_grid(-column => 1, -columnspan => ($browser_column_count + 1),
+		      -row => 0, -sticky => "news");
+
+  my (@browser_txtfrm, @browser_txt, @citation_txt);
+  for my $i (0..$browser_column_count) {
+    $browser_frm->g_grid_columnconfigure($i + 1, -weight => 1);
+    # Frame.for both citation and text
+    $browser_txtfrm[$i] = $browser_frm->new_tk__frame(-background => 'white', -padx => 5);
+    $browser_txtfrm[$i]->g_grid_columnconfigure(0, -weight => 1);
+    $browser_txtfrm[$i]->g_grid_columnconfigure(1, -weight => 0);
+    $browser_txtfrm[$i]->g_grid
+      (-column => $i + 1, -row => 1,  -sticky => "nwes");
+
+    #citation
+    $citation_txt[$i] = $browser_txtfrm[$i]->new_tk__text
+      (
+       -width  => 3,
+       -height => 30,
+       -font   => 'TkTextFont',
+       -wrap   => 'none',
+       -foreground => 'gray',
+       -borderwidth => 3,
+       -relief => 'flat',
+       -spacing3 => 2,
+       -insertborderwidth => 0,
+       -highlightthickness => 0,
+       -selectbackground => 'white',
+       -selectforeground => 'gray',
+      );
+    $citation_txt[$i]->g_grid(-column => 0, -row => 0, -sticky => "nwes");
+    # make citation not selectable
+    $citation_txt[$i]->g_bind
+      ('<<Selection>>',
+       sub {
+	 $citation_txt[$i]->tag_remove('sel', '1.0', 'end')
+	   if $citation_txt[$i]->tag_ranges('sel');
+       }
+      );
+
+    #text
+    $browser_txt[$i] = $browser_txtfrm[$i]->new_tk__text
+      (
+       -width  => 3,
+       -height => 30,
+       -font   => 'TkTextFont',
+       -wrap   => 'none',
+       -borderwidth => 3,
+       -relief => 'flat',
+       -spacing3 => 2,
+       -insertborderwidth => 0,
+       -highlightthickness => 0,
+      );
+    $browser_txt[$i]->g_grid(-column => 1, -row => 0, -sticky => "nwes");
+  }
+
+  # Movement Buttons
+  my $backward_bttn = $browser_frm->new_ttk__button
+    (-text => "←",
+     -width => 3,
+    );
+
+  my $forward_bttn = $browser_frm->new_ttk__button
+    (-text => "→",
+     -width => 3,
+    );
+
+  $backward_bttn->g_grid (-column => 0, -row => 1);
+  $forward_bttn->g_grid  (-column => $browser_column_count + 2, -row => 1);
+  $browser_frm->g_grid_columnconfigure(0, -weight => 0);
+  $browser_frm->g_grid_columnconfigure($browser_column_count + 2, -weight => 0);
+
+  # Close Button
+  my $browser_close_bttn = $browser_frm->new_ttk__button
+    (-text => $ls{close},
+     -command => sub { $browser_w->g_destroy(); }
+    );
+  $browser_close_bttn->g_grid(-column => 1, -columnspan => ($browser_column_count + 1),
+			      -row => 2, -pady => '10 10');
+
+
+  # Load data
+  $auth          = $tlg_browser->parse_idt($auth);
+  my $work       = $tlg_browser->get_work($auth, $offset);
+  my @work_begin = $tlg_browser->seek_passage($auth, $work);
+  my $start      = $tlg_browser->get_relative_offset($offset, $auth, $work);
+
+  @browser_buffers = ();
+  @browser_headers = ();
+  @browser_indices = ();
+
+  # Browe object to be passed to the callbacks and functions
+  my $browser =
+    {
+     header_txt    => $header_txt,
+     browser_txt   => \@browser_txt,
+     citation_txt  => \@citation_txt,
+     forward_bttn  => $forward_bttn,
+     backward_bttn => $backward_bttn,
+    };
+
+  # Load the passage
+  {
+    my ($buf, @ind);
+    local *STDOUT;
+    open STDOUT, '>:raw', \$buf;
+    @ind = $tlg_browser->browse_half_backward($start, -1);
+    my $times = ($browser_column_count) / 2;
+    for (1..$times) {
+      $buf = '';
+      open STDOUT, '>:raw', \$buf;
+      @ind = $tlg_browser->browse_backward(@ind);
+    }
+    unshift @browser_buffers, \$buf;
+    unshift @browser_indices, \@ind;
+
+    browser_browse($browser_column_count);
+    browser_insert_contents($browser);
+  }
+
+  # mark the line containing the end of the first match
+  my $marked = ($browser_column_count) / 2;
+  $browser_txt[$marked]->tag_add('sel', '13.0', '14.0');
+
+  # KEY Bindings, button callbacks, scale callbacks
+  $forward_bttn->configure (-command => [\&browse_forward,  $browser]);
+  $backward_bttn->configure(-command => [\&browse_backward, $browser]);
+
+  $browser_w->g_bind('<Prior>', sub { browse_backward($browser)
+					for 0..$browser_column_count });
+  $browser_w->g_bind('<Next>', sub { browse_forward($browser)
+				       for 0..$browser_column_count });
+  $browser_w->g_bind('<Left>',  [ \&browse_backward, $browser ]);
+  $browser_w->g_bind('<Right>', [ \&browse_forward,  $browser ]);
+  $browser_w->g_bind('<Home>',  [ \&browse_begin,    $browser ]);
+  $browser_w->g_bind('<End>',   [ \&browse_end,      $browser ]);
+  $browser_w->g_bind('<Escape>', sub{ $browser_w->g_destroy() });
+  $browser_w->g_bind('<q>',      sub{ $browser_w->g_destroy() });
+
+  my $text_font_size = $normal_size;
+  my $browser_txt_scale = sub {
+    my $num = shift;
+    my $active = Tkx::focus();
+    $text_font_size = ($text_font_size + $num > 5)
+      ? $text_font_size + $num
+      : 5;
+    if ($gentium_availible) {
+      $header_txt->configure
+	(-font => [-family => 'Gentium', -size => "$text_font_size"]);
+      for my $i (0..$#browser_txt) {
+	$citation_txt[$i]->configure
+	  (-font => [-family => 'Gentium', -size => "$text_font_size"]);
+	$browser_txt[$i]->configure
+	  (-font => [-family => 'Gentium', -size => "$text_font_size"]);
+      }
+    }
+    else {
+      $header_txt->configure
+	(-font => [-size => "$text_font_size"]);
+      for my $i (0..$#browser_txt) {
+	$citation_txt[$i]->configure(-font => [-size => "$text_font_size"]);
+	$browser_txt[$i]->configure(-font => [-size => "$text_font_size"]);
+      }
+    }
+  };
+  $browser_w->g_bind('<Control-plus>',   [\&$browser_txt_scale, '1'] );
+  $browser_w->g_bind('<Control-KP_Add>', [\&$browser_txt_scale, '1'] );
+  $browser_w->g_bind('<Control-minus>',  [\&$browser_txt_scale, '-1'] );
+  $browser_w->g_bind('<Control-KP_Subtract>', [\&$browser_txt_scale, '-1'] );
+}
+
+sub browser_browse {
+  my $count   = shift;
+  my $backwards;
+  if ($count == 0) { return }
+  elsif ($count < 0) {
+    $backwards = 1;
+    $count = -$count;
+  }
+
+  for (1..$count) {
+    local *STDOUT;
+    my ($buf, @ind);
+    open STDOUT, '>:raw', \$buf;
+    unless ( $backwards ) {
+      @ind = $tlg_browser->browse_forward(@{ $browser_indices[-1] });
+      return -1 if $ind[1] == -1;
+ #     say STDERR for @ind;
+      push @browser_buffers, \$buf;
+      push @browser_indices, \@ind;
+      if ($#browser_buffers > $browser_column_count) {
+	shift @browser_buffers; shift @browser_indices;
+	say STDERR Dumper(@browser_indices);
+      }
+    }
+    else {
+      @ind = $tlg_browser->browse_backward(@{ $browser_indices[0] });
+      return -1 if $ind[0] == $browser_indices[0][0];
+#      say STDERR for @ind;
+      unshift @browser_buffers, \$buf;
+      unshift @browser_indices, \@ind;
+      if ($#browser_buffers > $browser_column_count) {
+	pop @browser_buffers; pop @browser_indices;
+	say STDERR Dumper(@browser_indices);
+      }
+    }
+  }
+}
+
+sub browser_insert_contents {
+  my $browser = shift;
+  for my $i (0..$browser_column_count) {
+    $browser->{browser_txt}[$i]->configure (-state => 'normal');
+    $browser->{citation_txt}[$i]->configure(-state => 'normal');
+    open my $str_fh, '<:utf8', $browser_buffers[$i];
+    local $/ = "\n\n";
+    $browser_headers[$i] = <$str_fh>;
+
+    my $buf = '';
+    $buf .= $_ while <$str_fh>;
+    # Chop beginning of the following work
+    if ( (my $pos = index $buf, '/ / /') != -1) {
+      $buf = substr $buf, 0, $pos;
+      $buf .= "\n"
+    }
+    # separate the citation form the text, get length of the longest line
+    my $cit = '';
+    my ($bufllen, $citllen) = (0, 0);
+    my @lines = split "\n", $buf;
+    for (@lines) {
+      s/\s+$//;
+      if (s/^(\S+)\s+//mg) {
+	$cit .= $1 ."\n";
+	my $wlen = length($1);
+	$citllen = ($citllen >= $wlen) ? $citllen : $wlen;
+      }
+      else {
+	s/^\s+//;
+	$cit .= "\n"
+      }
+      my $llen = length;
+      $bufllen = ($bufllen >= $llen) ? $bufllen : $llen;
+    }
+    $bufllen -= 5;
+    $buf = join "\n", @lines;
+    $browser->{citation_txt}[$i]->delete("1.0", "end");
+    $browser->{citation_txt}[$i]->insert("end", $cit);
+    $browser->{citation_txt}[$i]->delete("end-1l", "end");
+    $browser->{citation_txt}[$i]->configure(-width => $citllen,
+					    -state => 'disabled');
+
+    $browser->{browser_txt}[$i]->delete("1.0", "end");
+    $browser->{browser_txt}[$i]->insert("end", $buf);
+    $browser->{browser_txt}[$i]->delete("end-1l", "end");
+    $browser->{browser_txt}[$i]->configure (-width => $bufllen,
+					    -state => 'disabled');
+  }
+  $browser->{header_txt}->configure(-state => 'normal');
+  $browser->{header_txt}->delete("1.0", "end");
+  $browser->{header_txt}->insert("end", $browser_headers[0]);
+  $browser->{header_txt}->delete("end-1l", "end");
+  $browser->{header_txt}->tag_add("header", "1.0", "end");
+  $browser->{header_txt}->configure(-state => 'disabled');
+}
+
+sub browse_forward {
+  my $browser = shift;
+  my $r = browser_browse(1);
+  unless ($r == -1) {
+    $browser->{forward_bttn}->state("!disabled");
+    $browser->{backward_bttn}->state("!disabled");
+    browser_insert_contents($browser);
+  }
+  else {
+    $browser->{forward_bttn}->state("disabled");
+  }
+}
+
+sub browse_begin {
+  my $browser = shift;
+  until (browser_browse(-1) == -1) { };
+  $browser->{backward_bttn}->state("disabled");
+  $browser->{forward_bttn}->state("!disabled");
+  browser_insert_contents($browser);
+}
+
+sub browse_end {
+  my $browser = shift;
+  until (browser_browse(1) == -1) { };
+  $browser->{forward_bttn}->state("disabled");
+  $browser->{backward_bttn}->state("!disabled");
+  browser_insert_contents($browser);
+}
+
+sub browse_backward {
+  my $browser = shift;
+  my $r = browser_browse(-1);
+  unless ($r == -1) {
+    $browser->{forward_bttn}->state("!disabled");
+    $browser->{backward_bttn}->state("!disabled");
+    browser_insert_contents($browser);
+  }
+  else {
+    $browser->{backward_bttn}->state("disabled");
+  }
+}
+
+
+#------------------------------------------------
 # BLACKLIST EDITOR
 
-# PREFERENCES
+#------------------------------------------------
+# EXPORT FUNCTIONS
+#------------------------------------------------
+
+sub export_to_text {
+  my $txt      = shift;
+
+  my $lmark  = '-->';
+  my $rmark  = '<--';
+  my $hstartl = '';
+  my $hstartr = '';
+  my $hend   = "\n";
+  my $istart = '';
+  my $iend   = '';
+
+  my $maxline = 62;
+  my $separator = '=' x $maxline;
+  my $firstcol = $maxline - 24;
+
+  my $center = sub {
+    my $str = shift;
+    my $pad = int(($maxline - length($str)) / 2);
+    $str = ' ' x $pad . $str;
+    return $str;
+  };
+
+  # Add export header
+  my $title = ($txt eq $results_txt) ? "LYNKEUS REPORT" : $ls{single_results};
+  my $date = date();
+
+  my $header = '';
+  if ($txt eq $results_txt) {
+    my @input_lines = split /\n/,
+      $input_txt->get("1.0", "end");
+    for my $line (@input_lines) {
+      breakline(\$line, $maxline);
+    }
+    my $text = join "\n", @input_lines;
+    my @statistics = get_statistics();
+    my $searchtype = ($st_lemma)
+      ? $ls{lemma} : $ls{verbatim};
+    my $context_type = get_context_type_str();
+
+    $header .= "$separator\n";
+    $header .= $center->($title) . "\n";
+    $header .= $center->($date) . "\n";
+    $header .= "$separator\n";
+    $header .= sprintf "%-38s%12s%12s\n", @{ shift @statistics };
+    while (@statistics) {
+      my ($terminus, $hits, $weight) = @{ shift @statistics };
+      $terminus =~ s/^([^(]+)\(.*$/$1/;
+      $header .= sprintf "%-38s%12d%12d\n", $terminus, $hits, $weight;
+    }
+
+    $header .= "$separator\n";
+    $header .= sprintf "%-31s%31s\n",
+      "$ls{search_type}: $searchtype",
+      "$ls{context}: $context $context_type";
+    $header .= sprintf "%-31s%31s\n",
+      "$ls{search_in}: $si_corpus",
+      "$ls{threshold}: $threshold";
+    $header .= "$separator\n";
+  }
+  else {
+    my (@viewed_words, $text);
+    for my $index (@{ $open_viewers{$txt} }) {
+      ($st_lemma)
+	? push @viewed_words, $words[$index]{lemma}
+	: push @viewed_words, $words[$index]{word};
+    }
+    $header .= "$separator\n";
+    $header .= $center->($title) . "\n";
+    $header .= $center->($date) . "\n";
+    $header .= $center->($_) . "\n" for @viewed_words;
+    $header .= "$separator\n";
+  }
+
+  $separator = "\n$separator\n\n";
+  my $output = export( $txt, $header, $lmark, $rmark,
+		       $hstartl, $hstartr, $hend, $istart, $iend,
+		       $separator, $maxline );
+  return $output;
+}
+
+sub export_to_mom {
+  my $txt      = shift;
+
+  my $lmark   = '\\*[BD]';
+  my $rmark   = '\\*[PREV]';
+
+  my $hstartl = ".FT B\n" . ".COLOR green\n";
+  my $hstartr = "\n.SP 2p" . "\n.COLOR black";
+
+  my $hend    = "\n.SP 6p" . "\n.FT R";
+  my $istart  = ".SP 2p\n" . ".FT R\n" . ".COLOR gray\n";
+  my $iend    = "\n.COLOR black";
+
+  my $separator = ".SP 2p\n" . ".DRH\n" . ".SP 2p\n" . "\n";
+  my $maxline = 82;
+
+  my $title = ($txt eq $results_txt) ? "LYNKEUS REPORT" : $ls{single_results};
+  $title = uc $title;
+  my $date  =  date();
+  my $header = <<EOT;
+.TITLE "$title"
+.SUBTITLE "$date"
+.PRINTSTYLE TYPESET
+.PAPER A4
+.FAMILY GentiumPlus
+.FT R
+.NEWCOLOR green RGB #3E7804
+.NEWCOLOR gray  RGB #808080
+.HEADER_LEFT "$date"
+.HEADER_CENTER "###"
+.HEADER_RIGHT "$title"
+.HY OFF
+.START
+.LEFT
+
+EOT
+
+  if ($txt eq $results_txt) {
+    my @input_lines = split /\n/,
+      $input_txt->get("1.0", "end");
+    my $header_center = $input_lines[0];
+    $header_center =~ s/^((?:\s*\S+){0,5}).*/$1/;
+    ($header_center, undef) =
+      split /[.,·;]/, $header_center, 2;
+    $header =~ s/###/$header_center/;
+
+    $header .= ".BOX OUTLINED black\n";
+    $header .= ".PP\n";
+    $header .= "$_\n.BR\n" for @input_lines;
+    $header .= ".BOX END\n";
+
+    my @statistics = get_statistics();
+    my $searchtype = ($st_lemma)
+      ? $ls{lemma} : $ls{verbatim};
+    my $context_type = get_context_type_str();
+    $header .= ".TS\n";
+    $header .= "expand;\n";
+    $header .= "l r 1 r.\n";
+    my $firstrow = shift @statistics;
+    for my $item (@$firstrow) {
+      $header .= "$item\t";
+    }
+    $header .= "\n" . "_\n" . ".SP 4p\n";
+    for my $line (@statistics) {
+      for my $item (@$line) {
+	$header .= "$item\t";
+      }
+      $header .= "\n";
+    }
+    $header .= <<EOT;
+_
+.TE
+.RLD 10p
+.MCO
+.LEFT
+$ls{search_type}: $searchtype
+$ls{context}: $context $context_type
+.MCR
+.RIGHT
+$ls{search_in}: $si_corpus
+$ls{threshold}: $threshold
+.MCX
+.RLD 10p
+.DRH 2 0p \\n[.l]u black
+.LEFT
+
+
+EOT
+  }
+  else {
+    my (@viewed_words, $text);
+    for my $index (@{ $open_viewers{$txt} }) {
+      ($st_lemma)
+	? push @viewed_words, $words[$index]{lemma}
+	: push @viewed_words, $words[$index]{word};
+    }
+    my $headline = $viewed_words[0];
+    for my $i (1..$#viewed_words) {
+      $headline .= "..." and last if $i > 2;
+      my $nextword = $viewed_words[$i];
+      $nextword =~ s/^([^(]+)\(.*$/$1/;
+      $headline .= ", $nextword"
+    }
+    $header =~ s/###/$headline/;
+    $header .= ".CENTER\n";
+    $header .= "$_\n" for @viewed_words;
+    $header .= ".DRH 2 0p \\n[.l]u black\n";
+    $header .= ".LEFT\n";
+    $header .= "\n\n";
+  }
+
+  my $output = export( $txt, $header, $lmark, $rmark,
+		       $hstartl, $hstartr, $hend, $istart, $iend,
+		       $separator, $maxline );
+
+  $output =~ s/;/;/g;
+  return $output;
+}
+
+sub date {
+  my (undef,undef,undef,$day,$mon,$year) = localtime;
+  $year += 1900;
+  $mon += 1;
+  return my $date = sprintf "%d.%d.%d", $day, $mon, $year;
+}
+
+sub get_statistics {
+  my @items = split ' ', $stats_tw->children('');
+  my @columns = ($ls{search_term}, $ls{numberofhits}, $ls{weight}) ;
+  for my $i (0..$#items) {
+    my $item   = $items[$i];
+    my $text   = $stats_tw->item($item, '-text');
+    my $hits   = $stats_tw->set ($item, 'hits');
+    my $weight = $stats_tw->set ($item, 'weight');
+    $items[$i] = [ $text, $hits, $weight ];
+  }
+  unshift @items, \@columns;
+  return @items;
+}
+
+sub breakline {
+  my $ref = shift;
+  my $max = shift;
+  my $length = length $$ref;
+  my $pos = 0;
+  my @newlines;
+
+  while ($length - $pos > $max) {
+    $pos += $max;
+    --$pos until substr($$ref, $pos, 1) eq ' ';
+    push @newlines, $pos;
+  }
+  for my $n (reverse @newlines) {
+    $$ref = substr($$ref, 0, $n - 1) . "\n" . substr($$ref, $n + 1)
+  }
+}
+
+sub export {
+  my ($txt, $header,
+      $lmark, $rmark,
+      $hstartl, $hstartr, $hend,
+      $istart, $iend,
+      $separator, $maxline) = @_;
+
+  my $i = 0;
+  my %lines = map { ++$i, $_ }
+    split "\n", $txt->get('1.0', 'end');
+  $lines{0} = $header;
+
+  # Apply formatting for the matched tag
+  my @matched = split ' ', $txt->tag_ranges('matched');
+  @matched = map { my @array = split /\./, $_; \@array } @matched;
+  # filter out the hits split over two lines
+  {
+    my @indices = 1..($#matched - 1);
+    my @retained = (0);
+    while (@indices) {
+      my $end = shift @indices; my $start = shift @indices;
+      next if ( $matched[$start][1] == 0
+		and $matched[$end][0] + 1 == $matched[$start][0]
+		and $matched[$end][1] == length $lines{$matched[$end][0]} );
+      push @retained, $end, $start;
+    }
+    push @retained, $#matched;
+    @matched = @matched[@retained];
+  }
+
+  @matched = reverse @matched;
+  while (@matched) {
+    my ($endline,   $endoffset)   = @{ shift @matched };
+    $lines{$endline} =
+      substr($lines{$endline}, 0, $endoffset) .
+      $rmark .
+      substr($lines{$endline}, $endoffset);
+    my ($startline, $startoffset) = @{ shift @matched };
+    $lines{$startline} =
+      substr($lines{$startline}, 0, $startoffset) .
+      $lmark .
+      substr($lines{$startline}, $startoffset);
+  }
+
+  # Apply formatting for the header tag
+  my @header = split ' ', $txt->tag_ranges('header');
+  while (@header) {
+    my ($startline, undef) = split /\./,  shift @header;
+    my ($endline,   undef) = split /\./, shift @header;
+    for my $line ($startline..$endline) {
+      breakline( \$lines{$line}, $maxline )
+	if length($lines{$line}) > $maxline;
+    }
+    # $lines{$startline} = "\n" . $lines{$startline};
+    $lines{$startline} =~ s/^\s+//;
+    $lines{$startline} =  $hstartl . $lines{$startline} . $hstartr;
+    $lines{$endline}  .=  $hend;
+  }
+
+  # Apply formatting for the info tag
+  my @info = split ' ', $txt->tag_ranges('info');
+  while (@info) {
+    my ($startline, undef) = split /\./, shift @info;
+    my ($endline,   undef) = split /\./, shift @info;
+    $lines{$_} =~ s/\t/ /g for ($startline..$endline);
+    $lines{$startline} =  $istart . $lines{$startline};
+    $lines{$endline}  .=  $iend;
+  }
+
+  # Add separator lines
+  for my $count (0..$#{ $textframes{$txt} }) {
+    my ($line, undef) = split /\./, $txt->tag_ranges("s$count");
+    $lines{$line} = $separator if $line;
+  }
+
+  # Delete elided passages
+  my %elided;
+  for my $count (0..$#{ $textframes{$txt} }) {
+    next unless $txt->tag_cget("t$count", '-elide');
+    my @ranges = split ' ', $txt->tag_ranges("t$count");
+    @ranges = map { s/(\d+).*/$1/r } @ranges;
+    $elided{$_} = 1 for $ranges[0]..$ranges[1];
+  }
+
+  # Restrict output to selection if there is one
+  my @selected = split ' ', $txt->tag_ranges("sel");
+  my %selected;
+  while (@selected) {
+    my ($startline, undef) = split /\./, shift @selected;
+    my ($endline,   undef) = split /\./, shift @selected;
+    for my $num ($startline..$endline) {
+      $selected{$num} = 1;
+    }
+  }
+
+  my $output = '';
+  for my $num (sort numerically keys %lines) {
+    next if $elided{$num};
+    if (%selected) { next unless $selected{$num} }
+    $output .= $lines{$num} . "\n";
+  }
+
+  return $output;
+}
+
+#------------------------------------------------
+# MENU FUNCTIONS
+
+sub clear_search {
+  my $answer =  Tkx::tk___messageBox
+    (-type => "yesno",
+     -message => $ls{message_discard},
+     -default => "no",
+     -icon => "question", -title => $ls{new_search});
+  clear() if $answer eq 'yes';
+}
+
+sub clear {
+
+  end_search(); edit_search();
+  $input_txt->delete('1.0', 'end');
+  $lemmata_cvs->g_destroy() if $lemmata_cvs;
+  undef @lemmata_bttn;
+  undef $lemmata_continue_bttn;
+
+  # clear stats_tw
+  my @stats_tw_items = $stats_tw->children('');
+  $stats_tw->delete("@stats_tw_items");
+  $results_txt->delete('1.0', 'end');
+
+  $results_n->tab('0', -state => 'hidden');
+  $results_n->tab('1', -state => 'hidden');
+  $results_n->tab('2', -state => 'hidden');
+
+  # clear menus associated with $results_txt
+  clear_output_menus();
+
+  @words = ();
+  %deleted_passages = ();
+  %elided_passages  = ();
+}
+
+sub save_to_file {
+  error($ls{save_nothing}) and return unless @words;
+
+  return unless my $filename = Tkx::tk___getSaveFile
+    (
+     -initialdir => '~',
+     -defaultextension => '.lyn',
+     -filetypes => [
+		    [['Lynkeus'], ['.lyn']]
+		   ],
+    );
+
+  # Global variables
+  my $save = {};
+  $save->{words}            = \@words;
+  $save->{results}          = \%results;
+  $save->{output}           = \%output;
+  $save->{textframes}       = \%textframes;
+  $save->{deleted_passages} = \%deleted_passages;
+  $save->{elided_passages}  = \%elided_passages;
+  # We have to delete the textframe entries of the opened viewers
+  for my $viewer (keys %open_viewers) {
+    delete $save->{textframes}{$viewer}
+  }
+
+  $save->{select_st_lemma}       = $select_st_lemma;
+  $save->{select_st_synonyma}    = $select_st_synonyma;
+  $save->{select_st_continentia} = $select_st_continentia;
+  $save->{select_si_corpus}      = $select_si_corpus;
+  $save->{st_lemma}              = $st_lemma;
+  $save->{st_synonyma}           = $st_synonyma;
+  $save->{st_continentia}        = $st_continentia;
+  $save->{si_corpus}             = $si_corpus;
+  $save->{context}               = $context;
+  $save->{context_types_str}     = \@context_types_str;
+  $save->{context_type}          = $context_type;
+  $save->{context_type_str}      = $context_type_str;
+
+  $save->{threshold}      = $threshold;
+  $save->{progress_w_cnt} = $progress_w_cnt;
+
+  $save->{selected_str}   = \@selected_str;
+  $save->{selected_num}   = \@selected_num;
+  $save->{weight}         = $weight;
+  $save->{lemmata}        = \%lemmata;
+  $save->{g_stem_min}     = $g_stem_min;
+  $save->{g_max_alt}      = $g_max_alt;
+  $save->{g_chop_optional_groups} = $g_chop_optional_groups;
+
+  # State of the widgets: $input_txt
+  $save->{input_txt} = $input_txt->get('1.0', 'end');
+
+  # State of the widgets, Tab 0: Lemmata
+  $save->{tab_0} = $results_n->tab('0', '-state');
+
+  # State of the widgets, Tab 1: stats_tw
+  $save->{tab_1} = $results_n->tab('1', '-state');
+
+  # State of the widgets, Tab 2: Results
+  $save->{tab_2} = $results_n->tab('2', '-state');
+
+  # Selected tab
+  $save->{tab_selected} = $results_n->select();
+
+  eval{ store $save, $filename };
+  $@ ? error  ($ls{save_failure})
+     : message($ls{save_success});
+}
+
+sub load_from_file {
+  return unless my $filename = Tkx::tk___getOpenFile
+    (
+     -initialdir => '~',
+     -defaultextension => '.lyn',
+     -filetypes => [
+		    [['Lynkeus'], ['.lyn']]
+		   ],
+    );
+  load($filename);
+}
+
+sub load {
+  my $filename = shift;
+  my $save = retrieve $filename;
+  error("$ls{load_failure} $filename: $ls{load_wrong_format}") and return
+    unless exists $save->{words};
+  clear();
+
+  # Clear global variables;
+  $searching = 0;
+  $interrupt = 0;
+  $printer_interrupt = 0;
+
+  # Reload global variables
+  @words            = @{ $save->{words} };
+  %results          = %{ $save->{results} };
+  %output           = %{ $save->{output} };
+  %textframes       = %{ $save->{textframes} };
+  %deleted_passages = %{ $save->{deleted_passages} };
+  %elided_passages  = %{ $save->{elided_passages} };
+
+  $select_st_lemma       = $save->{select_st_lemma};
+  $select_st_synonyma    = $save->{select_st_synonyma};
+  $select_st_continentia = $save->{select_st_continentia};
+  $select_si_corpus      = $save->{select_si_corpus};
+  $st_lemma              = $save->{st_lemma};
+  $st_synonyma 		 = $save->{st_synonyma};
+  $st_continentia 	 = $save->{st_continentia};
+  $si_corpus             = $save->{si_corpus};
+  $context 		 = $save->{context};
+  @context_types_str 	 = @{ $save->{context_types_str} };
+  $context_type 	 = $save->{context_type};
+  $context_type_str 	 = $save->{context_type_str};
+
+  $threshold      = $save->{threshold};
+  $progress_w_cnt = $save->{progress_w_cnt};
+
+  @selected_str 	  = @{ $save->{selected_str} };
+  @selected_num           = @{ $save->{selected_num} };
+  $weight 		  = $save->{weight};
+  %lemmata 		  = %{ $save->{lemmata} };
+  $g_stem_min 		  = $save->{g_stem_min};
+  $g_max_alt 		  = $save->{g_max_alt};
+  $g_chop_optional_groups = $save->{g_chop_optional_groups};
+
+  # Insert widget data: $input_txt
+  chomp $save->{input_txt};
+  $input_txt->insert('1.0', $save->{input_txt});
+
+  # Insert widget data: Tab 1, stats_tw
+  if ( $save->{tab_1} eq 'normal' ) {
+    $results_n->tab('1', -state => 'normal');
+    update_stats_tw($_) for 0..$#words;
+  }
+
+  # Insert results
+  if ( $save->{tab_2} eq 'normal' ) {
+    $results_n->tab('2', -state => 'normal');
+    finish_output();
+  }
+
+  # Select tab
+  if (exists $save->{tab_selected}) {
+    $results_n->select($save->{tab_selected});
+  }
+}
 
 #------------------------------------------------
 # MISCELLANEOUS FUNCTIONS
@@ -3835,34 +5698,34 @@ sub update_lang {
   $si_l->configure(-text => $ls{search_in});
   $input_bttn->configure(-text => $ls{$input_bttn_text});
 
-  if (@lemmata_bttn){
-    $lemmata_bttn[$_]->configure(-text => $ls{single_forms}) for (0..$#lemmata_bttn)
-  }
-  $lemmata_continue_bttn->configure(-text => $ls{continue}) if $lemmata_continue_bttn;
+  # if (@lemmata_bttn){
+  #   $lemmata_bttn[$_]->configure(-text => $ls{single_forms}) for (0..$#lemmata_bttn)
+  # }
+  # $lemmata_continue_bttn->configure(-text => $ls{continue}) if $lemmata_continue_bttn;
 
   $results_n->tab('0', -text => $ls{lemmata});
   $results_n->tab('1', -text => $ls{statistics});
   $results_n->tab('2', -text => $ls{result});
 
-  $stats_show_bttn->configure(-text => $ls{view})   if $stats_show_bttn;
-  $results_bttn->configure   (-text => $ls{result}) if $results_bttn;
+  # $stats_show_bttn->configure(-text => $ls{view})   if $stats_show_bttn;
+  # $results_bttn->configure   (-text => $ls{result}) if $results_bttn;
 
-  $stats_wrd_l->configure   (-text => uc( $ls{search_term} ))  if $stats_wrd_l;
-  $stats_add_bttn->configure(-text => $ls{add})                if $stats_add_bttn;
-  $stats_edit_bttn->configure (-text => $ls{edit})             if $stats_edit_bttn;
-  $stats_rm_bttn->configure (-text => $ls{remove})             if $stats_rm_bttn;
+  # $stats_wrd_l->configure   (-text => uc( $ls{search_term} ))  if $stats_wrd_l;
+  # $stats_add_bttn->configure(-text => $ls{add})                if $stats_add_bttn;
+  # $stats_edit_bttn->configure (-text => $ls{edit})             if $stats_edit_bttn;
+  # $stats_rm_bttn->configure (-text => $ls{remove})             if $stats_rm_bttn;
 
-  $stats_weight_l->configure(-text => uc( $ls{weight})) if $stats_weight_l;
+  # $stats_weight_l->configure(-text => uc( $ls{weight})) if $stats_weight_l;
 
-  $stats_context_l->configure(-text => uc( $ls{context})) if $stats_context_l;
-  $stats_threshold_l->configure(-text => uc( $ls{threshold})) if $stats_threshold_l;
+  # $stats_context_l->configure(-text => uc( $ls{context})) if $stats_context_l;
+  # $stats_threshold_l->configure(-text => uc( $ls{threshold})) if $stats_threshold_l;
 
-  $stats_tw->heading("#0", -text => $ls{search_term}, -anchor => "w")
-    if $stats_tw;
-  $stats_tw->heading("hits", -text => $ls{numberofhits}, -anchor => "w")
-    if $stats_tw;
-  $stats_tw->heading("weight", -text => $ls{weight}, -anchor => "w")
-    if $stats_tw;
+  # $stats_tw->heading("#0", -text => $ls{search_term}, -anchor => "w")
+  #   if $stats_tw;
+  # $stats_tw->heading("hits", -text => $ls{numberofhits}, -anchor => "w")
+  #   if $stats_tw;
+  # $stats_tw->heading("weight", -text => $ls{weight}, -anchor => "w")
+  #   if $stats_tw;
 
   @context_types_str_sing = split /\s+/, $ls{contexts};
   @context_types_str_plur = split /\s+/, $ls{Contexts};
@@ -3904,28 +5767,36 @@ sub clear_directory {
   }
 }
 
-sub error {
+sub message {
+  my $parent = ($_[0] =~ /^\./)
+    ? shift
+    : $mw;
   my $message = join '', @_;
   Tkx::tk___messageBox
-      (
-       -type => 'ok',
-       -icon => 'error',
-       -message => $message,
-      );
+    (
+     -parent => $parent,
+     -type => 'ok',
+     # -icon => 'info',
+     -message => $message,
+    );
+}
+
+sub error {
+  my $parent = ($_[0] =~ /^\./)
+    ? shift
+    : $mw;
+  my $message = join '', @_;
+  Tkx::tk___messageBox
+    (
+     -parent => $parent,
+     -type => 'ok',
+     -icon => 'error',
+     -message => $message,
+    );
 }
 
 sub is_numeric  { return (shift =~ /\D/) ? 0 : 1 }
+sub is_integer  { return (shift =~ /[^0-9]/) ? 0 : 1 }
 sub numerically { $a <=> $b }
-
-# File operations
-# $filename = Tkx::tk___getOpenFile();
-# $filename = Tkx::tk___getSaveFile();
-# $dirname = Tkx::tk___chooseDirectory();
-
-# Message Boxes
-# Tkx::tk___messageBox(-message => "Have a good day");
-# Tkx::tk___messageBox(-type => "yesno",
-# 	    -message => "Are you sure you want to install SuperVirus?",
-# 	    -icon => "question", -title => "Install");
 
 Tkx::MainLoop();
