@@ -1,0 +1,18 @@
+#+TITLE: Lynkeus -- A tool to find parallel passages in Classical Greek and Roman Literature
+
+* Contents
+* Overview
+* Getting Started
+* Search Modes
+** Verbatim Search
+** Lemma Search
+** Including Synonyms
+** Including Verba Continentia (Neighboring Terms)
+* Doing the Search
+** Managing Custom Corpora
+** Blacklists
+** Advanced Feature: The Pattern Editor
+* The Statistics View
+** View and Revise the Results of the Single Searches
+** Adjusting Weights and Threshold
+* Exporting

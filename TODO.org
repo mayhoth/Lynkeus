@@ -1,0 +1,12 @@
+#+TITLE: Features to be implemented until version 1.0 can be achieved
+
+* Debug on other Linux distributions
+* Definition of user specified corpora
+** $si_cbb and make_author_list
+** Editor to fetchbthe TLG nums
+* Blacklists
+** User defined blacklists and blacklist editor
+* PHI search
+* Pattern editor
+* Port to Windows
+* Port to MacOS

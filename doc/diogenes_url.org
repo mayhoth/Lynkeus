@@ -1,0 +1,28 @@
+
+* URL der Browser, Minimalbeispiel
+http://127.0.0.1:8888/Diogenes.cgi?
+  current_pageXXstate=browser_passage&
+  short_typeXXstate=tlg&
+  authorXXstate=0086&
+  workXXstate=002
+
+* URL des Browser
+http://127.0.0.1:8888/Diogenes.cgi?
+  JumpToFromPerseus=&
+  JumpFromQuery=&
+  JumpFromLang=&
+  JumpFromAction=&
+  browser_forward.x=10&
+  browser_forward.y=8&
+  citation_jump_loc=&
+  typeXXstate=TLG+Texts&
+  current_pageXXstate=browser_output&
+  begin_offsetXXstate=1169454&
+  authorXXstate=0086&
+  JumpToXXstate=tlg%2C0086%2C009%3A1231a%3A2&
+  end_offsetXXstate=1171557&
+  workXXstate=009&
+  short_typeXXstate=tlg
+
+* URL, mit der von der Suche zum Browser gesprungen wird
+http://127.0.0.1:8888/Diogenes.cgi?JumpTo=tlg,0086,009:1231a:2
