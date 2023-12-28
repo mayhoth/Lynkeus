@@ -1,4 +1,4 @@
-#! perl
+ #! perl
 use v5.14;
 use strict;
 use warnings;
@@ -17,7 +17,9 @@ our $Collator = Unicode::Collate->new
   (normalization => undef, level => 1);
 use Data::Dumper;
 use Encode;
+use POSIX qw(WNOHANG);
 
+use Cwd qw(abs_path);
 use FindBin qw($Bin);
 use File::Spec;
 use File::Temp qw(tempfile tempdir);
@@ -28,6 +30,8 @@ use Diogenes::Browser;
 
 binmode STDOUT, ':utf8';
 # use open qw( :std :encoding(UTF-8) );
+
+our $VERSION = '0.1.0';
 
 #----------------------------------------------------------------------
 # LOAD CONFIG FILE
@@ -40,7 +44,15 @@ our $select_st_continentia;
 our $select_si_corpus;
 
 # Language
-our $gui_lang;
+our $gui_lang = 'en';
+if ($ENV{LANG} and $ENV{LANG} =~ /^[^_]+/ ) {
+  say my $lang = $&;
+  my %languages = find_languages();
+  for my $key (keys %languages) {
+    $gui_lang = $lang and last if $lang eq $key;
+  }
+}
+
 our $default_threshold_percent;
 
 # Browser apperance
@@ -48,12 +60,36 @@ our $browser_column_count;
 our ($config_dir, $config_file);
 read_config_file();
 
+sub find_config_dir {
+  if ( $ENV{XDG_CONFIG_HOME} ) {
+    return File::Spec->catdir ($ENV{XDG_CONFIG_HOME}, 'Lynkeus');
+
+  }
+  elsif ( $ENV{HOME} ) {
+    return File::Spec->catdir ($ENV{HOME}, '.config', 'Lynkeus');
+  }
+  else {
+    die "Could not find path to configuration file:
+Please set the \$HOME environment variable!";
+  }
+}
+
+sub make_config_dir {
+  unless ( -d $config_dir ) {
+      if ( not $ENV{XDG_CONFIG_HOME}
+	   and not -d File::Spec->catdir($ENV{HOME}, '.config') ) {
+	mkdir File::Spec->catdir($ENV{HOME}, '.config');
+      }
+      mkdir $config_dir;
+    }
+}
+
 sub read_config_file {
   my ($attrib, $val);
   my %config = (
 		search_type => 'verbatim',
 		corpus => 'TLG',
-		language => 'eng',
+		language => $gui_lang,
 		threshold => '30',
 		browser_columns => '3',
 		tlg_dir => '',
@@ -61,18 +97,8 @@ sub read_config_file {
 		ddp_dir => '',
 	       );
 
-  if ( $ENV{XDG_CONFIG_HOME} ) {
-    $config_dir  = File::Spec->catdir ($ENV{XDG_CONFIG_HOME}, 'Lynkeus');
-    $config_file = File::Spec->catfile($config_dir, 'lynkeus.conf');
-  }
-  elsif ( $ENV{HOME} ) {
-    $config_dir  = File::Spec->catdir ($ENV{HOME}, '.config', 'Lynkeus');
-    $config_file = File::Spec->catfile($config_dir, 'lynkeus.conf');
-  }
-  else {
-    die "Could not find path to configuration file:
-Please set the \$HOME environment variable!";
-  }
+  $config_dir  = find_config_dir();
+  $config_file = File::Spec->catfile($config_dir, 'lynkeus.conf');
 
   if (-e $config_file ) {
     say "Found configuration file";
@@ -136,25 +162,33 @@ EOT
     }
     if ( $diogenes_config{tlg_dir} ) {
       warn "Could not find configuration file:
-Using Diogenes' TLG path instead!";
+Using Diogenes' TLG path instead!\n";
       $ENV{TLG_DIR} = $diogenes_config{tlg_dir};
     }
     else {
-      warn "No configuration file found";
-      our %languages = find_languages();
-      edit_configuration('startup');
-      exit;
+      warn "No configuration file found\n";
+
+      if ( $ENV{TLG_DIR}
+	   and -e File::Spec->catfile($ENV{TLG_DIR}, 'authtab.dir') ) {
+	$ENV{TLG_DIR} = abs_path $ENV{TLG_DIR}; # just in case
+	warn "Using path of the TLG_DIR environment variable!\n";
+      }
+      else {
+	our %languages = find_languages();
+	edit_configuration('startup');
+	exit;
+      }
     }
   }
 
   # load data info the defined global configuration variables
-  our $select_st_lemma       = ($config{search_type} =~ /lemma/)       ? 1 : 0;
-  our $select_st_synonyma    = ($config{search_type} =~ /synonyma/)    ? 1 : 0;
-  our $select_st_continentia = ($config{search_type} =~ /continentia/) ? 1 : 0;
-  our $select_si_corpus          = $config{corpus};
-  our $gui_lang                  = $config{language};
-  our $default_threshold_percent = $config{threshold};
-  our $browser_column_count      = $config{browser_columns};
+  $select_st_lemma       = ($config{search_type} =~ /lemma/)       ? 1 : 0;
+  $select_st_synonyma    = ($config{search_type} =~ /synonyma/)    ? 1 : 0;
+  $select_st_continentia = ($config{search_type} =~ /continentia/) ? 1 : 0;
+  $select_si_corpus          = $config{corpus};
+  $gui_lang                  = $config{language};
+  $default_threshold_percent = $config{threshold};
+  $browser_column_count      = $config{browser_columns};
   $browser_column_count--;
 }
 
@@ -164,8 +198,6 @@ Using Diogenes' TLG path instead!";
 
 our $cores = get_nr_of_cores();
 our (@pid, @from_parent, @from_child, @to_parent, @to_child);
-# our $path = File::Spec->catdir
-#   ($Bin, '..', 'searches', 'current');
 our $path = tempdir( CLEANUP => 1 );
 
 create_worker_processes();
@@ -286,13 +318,6 @@ sub corpus_search {
        -pattern_list => $patterns,
     );
   $query->{lynkeus_fh} = $parent_fh;
-  # restrict search to the selected value
-  # if (@$author_nums) {
-  #   $query->select_authors(-author_nums => $author_nums);
-  # }
-  # else {
-  #   $query->select_authors();
-  # }
 
   my $result;
   {
@@ -305,7 +330,6 @@ sub corpus_search {
       $query->pgrep;
       say { $parent_fh} "A: ", ++$count,  " $author_num";
     }
-    # delete $query->{buf};
   }
   $result = '' unless defined $result;
 
@@ -335,24 +359,37 @@ sub kill_worker_processes {
     say "Killed off worker no. $i!";
   }
 }
-#----------------------------------------------------------------------
+
 #----------------------------------------------------------------------
 #----------------------------------------------------------------------
 # SYSTEM-SPECIFIC VARIABLES
 our $windowing_system = Tkx::tk_windowingsystem();
 
-#----------------------------------------------------------------------
+# Test is groff works and has GentiumPlus installed
+our $groff_available = `groff -v`;
+if ($groff_available) {
+  my $err = qx(echo '.FAMILY GentiumPlus' | groff -mmom -Kutf8 -Tpdf -t 2>&1 1> /dev/null);
+  if ($err) {
+    say "Groff error:\n${err}Groff export disabled" if $err;
+    $groff_available = undef;
+  }
+}
+
 our $autoscroll = 1;
 
 # Scaling on Windows is off
-# Autoscaling does not work either (tklib is not installee)
+# Autoscaling does not work either (tklib is not installed)
 if ($^O =~ /win/i) {
   $autoscroll = 0;
   Tkx::tk('scaling', '3')
 }
 
-# active autoscroll if tklib is installed
-if ($autoscroll){
+# activate autoscroll if tklib is installed
+if ( $autoscroll ){
+  my $autoscroll_path =
+    File::Spec->catdir($Bin, '..', 'lib', 'autoscroll');
+  Tkx::eval("lappend auto_path \"$autoscroll_path\"");
+  # Tkx::eval("package require autoscroll");
   Tkx::package_require("autoscroll");
   $autoscroll = 1;
 }
@@ -365,8 +402,11 @@ if ($autoscroll){
 Tkx::ttk__style_theme_use('clam') if $windowing_system eq 'x11';
 
 # if ($windowing_system eq 'x11') {
-#   Tkx::eval("lappend auto_path \"../lib/ttk-Breeze\"");
-#   Tkx::eval("package require ttk::theme::Breeze");
+#   my $ttk_breeze_path =
+#     File::Spec->catdir($Bin, '..', 'lib', 'ttk-Breeze');
+#   Tkx::eval("lappend auto_path \"$ttk_breeze_path\"");
+#   Tkx::package_require("ttk::theme::Breeze");
+#   # Tkx::eval("package require ttk::theme::Breeze");
 #   Tkx::ttk__style_theme_use('Breeze');
 # }
 
@@ -375,22 +415,30 @@ Tkx::ttk__style_theme_use('clam') if $windowing_system eq 'x11';
 our $normal_size = 11;
 our $small_size  = ($normal_size - 2);
 our $big_size    = ($normal_size + 2);
-our $gentium_availible;
+our $gentium_available;
+our $gentium;
 {
   my $font_families = Tkx::font_families();
-  $gentium_availible = 1 if $font_families =~ / Gentium /;
+  if ($font_families =~ /(^|\s)Gentium($|\s)/) {
+    $gentium_available = 1;
+    $gentium = 'Gentium';
+  }
+  if ($font_families =~ /(^|\s)GentiumPlus($|\s)/) {
+    $gentium_available = 1;
+    $gentium = 'GentiumPlus';
+  }
 }
 
-if ($gentium_availible) {
-  Tkx::font_configure('TkDefaultFont',      -family => 'Gentium', -size => $normal_size);
-  Tkx::font_configure('TkTextFont',         -family => 'Gentium', -size => $normal_size);
-#  Tkx::font_configure('TkFixedFont',        -family => 'Gentium', -size => $normal_size);
-  Tkx::font_configure('TkMenuFont',         -family => 'Gentium', -size => $normal_size);
-  Tkx::font_configure('TkHeadingFont',      -family => 'Gentium', -size => $normal_size);
-  Tkx::font_configure('TkIconFont',         -family => 'Gentium', -size => $normal_size);
-  Tkx::font_configure('TkCaptionFont',      -family => 'Gentium', -size => $big_size);
-  Tkx::font_configure('TkSmallCaptionFont', -family => 'Gentium', -size => $small_size);
-  Tkx::font_configure('TkTooltipFont',      -family => 'Gentium', -size => $small_size);
+if ($gentium_available) {
+  Tkx::font_configure('TkDefaultFont',      -family => $gentium, -size => $normal_size);
+  Tkx::font_configure('TkTextFont',         -family => $gentium, -size => $normal_size);
+#  Tkx::font_configure('TkFixedFont',        -family => $gentium, -size => $normal_size);
+  Tkx::font_configure('TkMenuFont',         -family => $gentium, -size => $normal_size);
+  Tkx::font_configure('TkHeadingFont',      -family => $gentium, -size => $normal_size);
+  Tkx::font_configure('TkIconFont',         -family => $gentium, -size => $normal_size);
+  Tkx::font_configure('TkCaptionFont',      -family => $gentium, -size => $big_size);
+  Tkx::font_configure('TkSmallCaptionFont', -family => $gentium, -size => $small_size);
+  Tkx::font_configure('TkTooltipFont',      -family => $gentium, -size => $small_size);
 }
 
 #----------------------------------------------------------------------
@@ -461,7 +509,7 @@ sub read_greek_analyses_index {
 our %ls;				# ls stand for locale string
 our %languages = find_languages();
 
-# Function that gets the availible languages
+# Function that gets the available languages
 sub find_languages {
   my %lang;
   eval {
@@ -474,7 +522,7 @@ which should hold the language files: Falling back to English!\n";
 
     for my $file (@files) {
       next unless $file;
-      next unless $file =~ /^[_a-z]+$/;	# only lowercase ASCII characters or underscores are legal
+      next unless $file =~ /^[_a-z]+$/;	# only lc ASCII characters or underscores
       open my $fh, '<:utf8', File::Spec->catfile($locale_dir, $file)
 	or warn "Cannot open locale file $file: $!\n";
       chomp (my $langname = <$fh>);
@@ -483,7 +531,7 @@ which should hold the language files: Falling back to English!\n";
     }
     closedir $dh;
   };
-  $lang{eng} = 'English';
+  $lang{en} = 'English';
   return %lang;
 }
 
@@ -499,6 +547,8 @@ sub gui_lang{
   $ls{pref}   = 'Preferences';
   $ls{lang}   = 'Language';
   $ls{help}   = 'Help';
+  $ls{manual} = 'Lynkeus Manual';
+  $ls{about}  = 'About Lynkeus';
 
   $ls{passage} = 'Passage';
   $ls{export}    = 'Export';
@@ -513,9 +563,10 @@ sub gui_lang{
   $ls{verbatim}    = 'verbatim';
   $ls{lemma}       = 'lemma';
 
-  $ls{synonyma}    = 'verba synonyma';
-  $ls{continentia} = 'verba continentia';
-  $ls{search_in}   = 'Search in';
+  $ls{synonyma}      = 'verba synonyma';
+  $ls{continentia}   = 'verba continentia';
+  $ls{search_in}     = 'Search in';
+  $ls{define_corpus} = 'Define Corpus';
 
   $ls{input}          = 'Input';
   $ls{lemmata}        = 'Lemmata';
@@ -588,7 +639,12 @@ sub gui_lang{
   $ls{load_failure} = 'Could not load file:';
   $ls{load_wrong_format} = 'File has the wrong file format!';
 
-  if    ($gui_lang eq 'eng') {  }
+  $ls{groff_success} = 'Groff finished successfully!';
+  $ls{groff_failure} = 'Groff failed!';
+  $ls{log} = 'Would you like to see the log file?';
+
+
+  if    ($gui_lang eq 'en') {  }
   else {
     eval {
       open my $locale_fh, '<:utf8',
@@ -610,9 +666,10 @@ sub gui_lang{
       }
     };
 
+    # Error handling
     if ($@) {
       say $@;
-      $gui_lang = 'eng';
+      $gui_lang = 'en';
       gui_lang()
     }
   }
@@ -729,7 +786,6 @@ $mw->g_wm_iconphoto('icon');
 
 # Resizing
 $mw->g_wm_minsize(1000,640);
-# $mw->g_wm_resizable(0,0);
 
 #----------------------------------------------------------------------
 # MENU BARS
@@ -740,7 +796,6 @@ our $menu = $mw->new_menu;
 $mw->configure(-menu => $menu);
 
 our $search_m  = $menu->new_menu;
-our $pref_m    = $menu->new_menu;
 our $help_m    = $menu->new_menu;
 our $passage_m = $menu->new_menu;
 our $export_m  = $menu->new_menu;
@@ -749,12 +804,6 @@ $menu->add_cascade
   (
    -menu      => $search_m,
    -label     => $ls{search},
-   -underline => 0,
-  );
-$menu->add_cascade
-  (
-   -menu      => $pref_m,
-   -label     => $ls{pref},
    -underline => 0,
   );
 $menu->add_cascade
@@ -784,41 +833,32 @@ $search_m->add_command		# index 2
    -underline => 0,
    -command => \&load_from_file,
   );
+$search_m->add_separator();
 $search_m->add_command		# index 3
-  (
-   -label => $ls{quit},
-   -underline => 0,
-   -command => sub { kill_worker_processes(); $mw->g_destroy }
-  );
-
-our $lang_m = $pref_m->new_menu;
-$pref_m->add_cascade
-  (
-   -menu => $lang_m,
-   -label => $ls{lang},
-  );
-$pref_m->add_command
   (
    -label => "$ls{pref}...",
    -underline => 0,
    -command => \&edit_configuration,
   );
 
-$lang_m->add_radiobutton
+$search_m->add_command		# index 4
   (
-   -label => 'Deutsch',
+   -label => $ls{quit},
    -underline => 0,
-   -variable => \$gui_lang,
-   -value => 'deu',
-   -command => \&update_lang,
+   -command => sub { kill_worker_processes(); $mw->g_destroy }
   );
-$lang_m->add_radiobutton
+
+$help_m->add_command		# index 4
   (
-   -label => 'English',
+   -label => $ls{manual},
    -underline => 0,
-   -variable => \$gui_lang,
-   -value => 'eng',
-   -command => \&update_lang,
+   -command => \&help
+  );
+$help_m->add_command		# index 4
+  (
+   -label => $ls{about},
+   -underline => 0,
+   -command => \&about_lynkeus
   );
 
 sub update_menu {
@@ -948,8 +988,7 @@ our $si_cbb = $input_bttn_frm->new_ttk__combobox
 	       'TLG',
 	       'PHI',
 	       'TLG+PHI',
-	       'Aristoteles',
-	       'Eigenes Corpus...',
+	       "$ls{define_corpus}...",
 	      ],
   );
 # $si_cbb->state('readonly');
@@ -957,7 +996,7 @@ $si_cbb->g_bind
   ("<<ComboboxSelected>>", sub { $si_cbb->selection_clear });
 
 our $input_bttn = $input_bttn_frm->new_ttk__button
-    (-text => $ls{search},
+  (-text => $ls{search},
    -command => \&begin_search,
    -default => 'active',
   );
@@ -1346,7 +1385,7 @@ sub set_text_font {
     $text_font_size = ($text_font_size + $num > 5)
       ? $text_font_size + $num
       : 5;
-    if ($gentium_availible) {
+    if ($gentium_available) {
       Tkx::i::call("$active", 'configure', "-font", [-family => 'Gentium', -size => "$text_font_size"]);
     }
     else {
@@ -1370,7 +1409,7 @@ $results_txt->g_bind('<Control-KP_Subtract>', [\&$results_txt_scale, '-1'] );
 # KNOWN TAGS FOR TEXT WIDGETS
 #----------------------------------------------------------------------
 # input_txt
-if ($gentium_availible) {
+if ($gentium_available) {
   $input_txt->tag_configure
     ("searching",
      #  -background => "yellow",
@@ -1428,6 +1467,7 @@ if (@ARGV) {
     load($arg);
   }
   else { error("$ls{load_failure} $arg!") }
+  warn "Lynkeus can only load one file at a time!\n" if @ARGV;
 }
 
 
@@ -1492,8 +1532,8 @@ sub begin_search {
 }
 
 sub clear_output_menus {
-  if ($menu->index('end') == 4) {
-    $menu->delete(2,3);
+  if ($menu->index('end') == 3) {
+    $menu->delete(1,2);
     $passage_m->delete(0,2);
     $export_m->delete(0,2);
   }
@@ -2364,9 +2404,6 @@ sub make_author_list {
       edit_search();
       return undef;
     }
-    elsif (/^Aristoteles$/) {
-      push @author_nums, "tlg", 86;
-    }
     # List of author numbers
     elsif (/^\d{1,4}(?:,\s*\d{1,4})*$/) {
       push @author_nums, "tlg";
@@ -2904,14 +2941,14 @@ sub print_results {
   }
   $output_m->{menu}->insert
     (
-     2, 'cascade',
+     1, 'cascade',
      -menu      => $output_m->{passage},
      -label     => $ls{passage},
      -underline => 0,
     );
   $output_m->{menu}->insert
     (
-     3,'cascade',
+     2,'cascade',
      -menu      => $output_m->{export},
      -label     => $ls{export},
      -underline => 0,
@@ -3389,12 +3426,8 @@ sub print_results_chunk {
      -filetypes => [ ['PDF', ['.pdf']] ],
     );
     my $output = export_to_mom($output_txt);
-    open my $fh, '|-:utf8', "groff -mmom -Kutf8 -Tpdf -t > $filename"
-      or die "Could not pipe to groff: $!";
-    print { $fh } $output;
-    close $fh;
+    Tkx::after(5, [\&groff, $output, $filename, $output_txt] );
   };
-
   $output_txt->g_bind('<y>', $undo);
   $output_txt->g_bind('<n>', $move_forwards);
   $output_txt->g_bind('<p>', $move_backwards);
@@ -3404,13 +3437,19 @@ sub print_results_chunk {
   $output_txt->g_bind('<Delete>', $delete);
   $output_txt->g_bind('<T>', $export_txt);
   $output_txt->g_bind('<M>', $export_roff);
-  $output_txt->g_bind('<P>', $export_pdf);
+  $output_txt->g_bind('<P>', $export_pdf) if $groff_available;
   $output_m->{passage}->entryconfigure(0, -command => $delete);
   $output_m->{passage}->entryconfigure(1, -command => $undo);
   $output_m->{passage}->entryconfigure(2, -command => $browse);
   $output_m->{export}->entryconfigure(0, -command => $export_txt);
   $output_m->{export}->entryconfigure(1, -command => $export_roff);
-  $output_m->{export}->entryconfigure(2, -command => $export_pdf);
+  if ($groff_available) {
+    $output_m->{export}->entryconfigure(2, -command => $export_pdf)
+  }
+  else {
+    $output_m->{export}->entryconfigure(2, -state => 'disabled')
+  }
+
   my $selectionhandler = sub {
     if ( $output_txt->tag_ranges('sel') ) {
       $output_m->{passage}->entryconfigure($_, -state => 'normal') for 0, 2;
@@ -4343,7 +4382,7 @@ sub edit_configuration {
   # GUI Language
   if ($arg) { my %languages = find_languages() }
   my %lang = reverse %languages;
-  my $selected_language = ($arg) ? $languages{eng} : $languages{$gui_lang};
+  my $selected_language = $languages{$gui_lang};
   my $lang_l = $cfg_settings->new_ttk__label(-text => "$ls{lang}:");
   my $lang_cbb = $cfg_settings->new_ttk__combobox
   (
@@ -4383,11 +4422,11 @@ sub edit_configuration {
     my $corpus = $corpus_var;
     $corpus = '' if $corpus eq 'TLG';
     my $lang = $lang{$selected_language};
-    $lang = '' if $lang eq 'eng';
+    $lang = '' if $lang eq 'en';
     $thresh = '' if $thresh == 30;;
     $browsercolumns = '' if $browsercolumns == 2;
 
-    mkdir $config_dir unless -d $config_dir;
+    make_config_dir() unless -d $config_dir;
     open my $config_fh, '>:utf8', $config_file
       or die "Cannot open config file $config_file: $!";
     say { $config_fh } 'tlg_dir "', $tlgpath, '"';
@@ -4966,7 +5005,7 @@ sub invoke_browser {
     $text_font_size = ($text_font_size + $num > 5)
       ? $text_font_size + $num
       : 5;
-    if ($gentium_availible) {
+    if ($gentium_available) {
       $header_txt->configure
 	(-font => [-family => 'Gentium', -size => "$text_font_size"]);
       for my $i (0..$#browser_txt) {
@@ -5477,6 +5516,188 @@ sub export {
   return $output;
 }
 
+sub groff {
+  my $output = shift;
+  my $filename = shift;
+  my $parent = shift // $mw;
+  (undef, my $src) = tempfile (OPEN => 0, CLEANUP => 0);
+  say $src;
+  open my $fh, '>:utf8', $src or warn "Cannot open tempfile $src: $!";
+  print { $fh } $output;
+  close $fh;
+  (undef, my $log) = tempfile (OPEN => 0, CLEANUP => 0);
+  my $pid = fork;
+  unless ($pid) {
+    exec "groff -mmom -Kutf8 -Tpdf -t $src 1> $filename 2> $log"
+  }
+  # my $pid = open my $fh, '|-:utf8',
+  #   "groff -mmom -Kutf8 -Tpdf -t > $filename 2> $log"
+  #   or error("Could not pipe to groff: $!");
+  # say { $fh } $output;
+  # close $fh;
+  Tkx::after( 5, [\&wait_for_groff, $pid, $log, $src, $parent] );
+}
+
+sub wait_for_groff {
+  my ($pid, $log, $src, $parent) = @_;
+  my $res = waitpid($pid, WNOHANG);
+  if ($res == -1 or $res == $pid) {
+    my $retval = $? >> 8;
+    $parent = $parent->g_winfo_exists() ? $parent : $mw;
+
+    # get stderr output
+    my $logstr = '';
+    if ( open my $log_fh, '<', $log ) {
+      local $/ = undef;
+      $logstr = <$log_fh>;
+      close $log_fh; unlink $log;
+    }
+    else {
+      warn "Could not open log: $!"
+    }
+    unlink $src;
+
+    # Normal exit
+    unless ($retval) {
+      if ($logstr) {
+	my $yesno = Tkx::tk___messageBox
+	  ( -parent => $parent,
+	    -type => 'yesno',
+	    -default => 'no',
+	    -message => "$ls{groff_success} $ls{log}"
+	  );
+	if ($yesno eq 'yes') {
+	  view_txt($logstr, $parent, 92);
+	}
+      }
+      else {
+	Tkx::tk___messageBox
+	  ( -parent => $parent,
+	    -type => 'ok',
+	    -message => $ls{groff_success}
+	  );
+      }
+    }
+    else {
+      # Error
+      if ($logstr) {
+	my $yesno = Tkx::tk___messageBox
+	  ( -parent => $parent,
+	    -type => 'yesno',
+	    -default => 'no',
+	    -message => "$ls{groff_failure} (Exit code $retval) $ls{log}"
+	  );
+	if ($yesno eq 'yes') {
+	  view_txt($logstr, $parent, 92);
+	}
+      }
+      else {
+	Tkx::tk___messageBox
+	  ( -parent => $parent,
+	    -type => 'ok',
+	    -message => "$ls{groff_failure} (Exit code $retval)"
+	  );
+      }
+    }
+  }
+  elsif ( $res == 0 ) {
+    Tkx::after( 100, [\&wait_for_groff, $pid, $log, $src, $parent] );
+  }
+  else {
+    die "Waitpid should return either $pid, 0 or -1, but returns $res!"
+  }
+}
+
+#------------------------------------------------
+# TEXT VIEWER
+sub view_txt {
+  my $str    = shift;
+  my $parent = shift;
+  my $width = shift // 62;
+    # window definition
+  my $txtview = $parent->new_toplevel
+    (
+     -padx => 5,
+     -pady => 5,
+    );
+  $txtview->g_wm_title('Info');
+  $txtview->g_wm_iconphoto('icon');
+
+  my $txtview_txt = $txtview->new_tk__text
+  (
+   -width  => $width,
+   -height => 20,
+   -font   => 'TkFixedFont',
+   -padx   => 5,
+   -pady   => 5,
+   -wrap   => 'word',
+   -border => 0,
+   -spacing3 => 2,
+   -exportselection => 1,
+  );
+  my $txtview_scroll = $txtview->new_ttk__scrollbar
+  (
+   -orient => 'vertical',
+   -command => [$txtview_txt, 'yview']
+  );
+  $txtview_txt->configure(-yscrollcommand => [$txtview_scroll, 'set']);
+  $txtview_scroll->g___autoscroll__autoscroll() if $autoscroll;
+  my $txtview_bttn = $txtview->new_ttk__button
+    ( -text    => $ls{ok},
+      -command => sub { $txtview->g_destroy() }
+    );
+  $txtview->g_grid_columnconfigure(0, -weight => 1);
+  $txtview->g_grid_columnconfigure(1, -weight => 0);
+  $txtview_txt->g_grid   (-column => 0, -row => 0, -pady => '5 5', -sticky => 'nwes');
+  $txtview_scroll->g_grid(-column => 1, -row => 0, -pady => '5 5', -sticky => 'ns');
+  $txtview_bttn->g_grid(-column => 0, -row => 1, -pady => '5 5');
+
+  $txtview_txt->insert('1.0', $str);
+}
+
+#------------------------------------------------
+# MARKDOWN VIEWER
+
+sub view_md {
+  my @paragraphs = split "\n\n", shift;
+  my %h;
+
+  # delete newlines
+  s/\n/ /g for @paragraphs;
+
+  # parse md source
+
+  # window definition
+  my $mdview = $mw->new_toplevel
+    (
+     -padx => 5,
+     -pady => 5,
+    );
+  $mdview->g_wm_title('Info');
+  $mdview->g_wm_iconphoto('icon');
+
+  my $mdview_txt = $mdview->new_tk__text
+  (
+   -width  => 62,
+   -height => 20,
+   -font   => 'TkTextFont',
+   -padx   => 5,
+   -pady   => 5,
+   -wrap   => 'word',
+   -border => 0,
+   -spacing3 => 2,
+   -exportselection => 1,
+  );
+  my $mdview_scroll = $mdview->new_ttk__scrollbar
+  (
+   -orient => 'vertical',
+   -command => [$mdview_txt, 'yview']
+  );
+  $mdview_txt->configure(-yscrollcommand => [$mdview_scroll, 'set']);
+  $mdview_scroll->g___autoscroll__autoscroll() if $autoscroll;
+}
+
+
 #------------------------------------------------
 # MENU FUNCTIONS
 
@@ -5661,6 +5882,43 @@ sub load {
   }
 }
 
+sub about_lynkeus {
+  my @msg_lines = split "\n", <<EOT;
+Lynkeus Version $VERSION
+This software is Copyright © 2023 by Michael Neidhart.
+Diogenes and its modules are Copyright © 1999–2023 by Peter J. Heslin.
+This is free software, licensed under:
+The GNU General Public License, Version 3, June 2007
+EOT
+
+  # window definition
+  my $about = $mw->new_toplevel
+    (
+     -padx => 5,
+     -pady => 5,
+    );
+  $about->g_wm_title($ls{about});
+  $about->g_wm_iconphoto('icon');
+  my @about_l;
+  $about_l[0] = $about->new_ttk__label
+    ( -text => $msg_lines[0], -font => [-weight => 'bold'] );
+  $about_l[0]->g_grid(-column => 0, -row => 0, -pady => '5 10');  
+  my $i;
+  for ($i = 1; $i <= $#msg_lines; ++$i) {
+    $about_l[$i] = $about->new_ttk__label( -text => $msg_lines[$i] );
+    $about_l[$i]->g_grid(-column => 0, -row => $i, -pady => '2 2');
+  }
+  my $about_b = $about->new_ttk__button
+    (-text => $ls{close},
+     -command => sub { $about->g_destroy() },
+  );
+  $about_b->g_grid(-column => 0, -row => ++$i, -pady => '10 5');
+  $about->g_bind('<KeyPress>', sub { $about->g_destroy() } );
+}
+
+sub help {
+}
+
 #------------------------------------------------
 # MISCELLANEOUS FUNCTIONS
 
@@ -5674,66 +5932,6 @@ sub get_context_type_str {
   for my $i (0..$#context_types) {
     return $context_types_str[$i] if $context_type eq $context_types[$i];
   }
-}
-
-sub update_lang {
-  gui_lang();
-  $menu->entryconfigure(0, -label => $ls{search});
-  $menu->entryconfigure(1, -label => $ls{pref});
-  $menu->entryconfigure(2, -label => $ls{help});
-
-  $search_m->entryconfigure(0, -label => $ls{new});
-  $search_m->entryconfigure(1, -label => $ls{save});
-  $search_m->entryconfigure(2, -label => $ls{load});
-  $search_m->entryconfigure(3, -label => $ls{quit});
-
-  $pref_m->entryconfigure(0, -label => $ls{lang});
-
-  $st_l->configure(-text => $ls{search_type});
-  $st_rbt_vbt->configure(-text => $ls{verbatim});
-  $st_rbt_lem->configure(-text => $ls{lemma});
-  $st_cbt_syn->configure(-text => $ls{synonyma});
-  $st_cbt_cnt->configure(-text => $ls{continentia});
-
-  $si_l->configure(-text => $ls{search_in});
-  $input_bttn->configure(-text => $ls{$input_bttn_text});
-
-  # if (@lemmata_bttn){
-  #   $lemmata_bttn[$_]->configure(-text => $ls{single_forms}) for (0..$#lemmata_bttn)
-  # }
-  # $lemmata_continue_bttn->configure(-text => $ls{continue}) if $lemmata_continue_bttn;
-
-  $results_n->tab('0', -text => $ls{lemmata});
-  $results_n->tab('1', -text => $ls{statistics});
-  $results_n->tab('2', -text => $ls{result});
-
-  # $stats_show_bttn->configure(-text => $ls{view})   if $stats_show_bttn;
-  # $results_bttn->configure   (-text => $ls{result}) if $results_bttn;
-
-  # $stats_wrd_l->configure   (-text => uc( $ls{search_term} ))  if $stats_wrd_l;
-  # $stats_add_bttn->configure(-text => $ls{add})                if $stats_add_bttn;
-  # $stats_edit_bttn->configure (-text => $ls{edit})             if $stats_edit_bttn;
-  # $stats_rm_bttn->configure (-text => $ls{remove})             if $stats_rm_bttn;
-
-  # $stats_weight_l->configure(-text => uc( $ls{weight})) if $stats_weight_l;
-
-  # $stats_context_l->configure(-text => uc( $ls{context})) if $stats_context_l;
-  # $stats_threshold_l->configure(-text => uc( $ls{threshold})) if $stats_threshold_l;
-
-  # $stats_tw->heading("#0", -text => $ls{search_term}, -anchor => "w")
-  #   if $stats_tw;
-  # $stats_tw->heading("hits", -text => $ls{numberofhits}, -anchor => "w")
-  #   if $stats_tw;
-  # $stats_tw->heading("weight", -text => $ls{weight}, -anchor => "w")
-  #   if $stats_tw;
-
-  @context_types_str_sing = split /\s+/, $ls{contexts};
-  @context_types_str_plur = split /\s+/, $ls{Contexts};
-  @context_types_str = ($context > 1)
-    ? @context_types_str_plur
-    : @context_types_str_sing;
-  $context_type_str = get_context_type_str();
-  $stats_context_cbb->configure(-values => \@context_types_str)
 }
 
 # Taken over from Perseus.pm, lines 62–80

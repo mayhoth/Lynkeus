@@ -12,6 +12,8 @@ quit   = Beenden
 pref   = Einstellungen
 lang   = Sprache
 help   = Hilfe
+manual = Lynkeus-Handbuch
+about  = Über Lynkeus
 
 passage = Stelle
 export   = Export
@@ -79,7 +81,7 @@ path_tlg = Pfad zum TLG
 path_phi = Pfad zum PHI
 path_ddp = Pfad zum DDP
 browse   = Durchsuchen
-defaults    = Standarteinstellungen
+defaults    = Standardeinstellungen
 browsercols = Browserspalten
 
 new_search      = Neue Suche
@@ -100,3 +102,6 @@ save_failure = Konnte die Suche nicht speichern:
 
 load_failure = Konnte Datei nicht öffnen:
 load_wrong_format = Datei hat ein ungültiges Format!
+
+groff_log      = Pdf erstellt! Wollen Sie das Log sehen?
+groff_finished = Pdf erstellt!
