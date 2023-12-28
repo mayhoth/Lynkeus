@@ -1,4 +1,4 @@
- #! perl
+#! /usr/bin/perl
 use v5.14;
 use strict;
 use warnings;
@@ -196,7 +196,8 @@ Using Diogenes' TLG path instead!\n";
 # STARTUP OF THE WORKER PROCESSES
 #----------------------------------------------------------------------
 
-our $cores = get_nr_of_cores();
+our $CORES      = get_nr_of_cores();
+our $PARENT_PID = $$;
 our (@pid, @from_parent, @from_child, @to_parent, @to_child);
 our $path = tempdir( CLEANUP => 1 );
 
@@ -208,13 +209,13 @@ sub get_nr_of_cores {
   # Portable solution: Sys::Info::Device::CPU?
   open my $handle, "/proc/cpuinfo"
     or die "Can't open cpuinfo: $!\n";
-  (my $cores = map /^processor/, <$handle>)--;
+  (my $CORES = map /^processor/, <$handle>)--;
   close $handle;
-  return $cores;
+  return $CORES;
 }
 
 sub create_worker_processes {
-  for my $i (0..$cores) {
+  for my $i (0..$CORES) {
     # Make the pipes
     pipe($from_parent[$i], $to_child[$i])
       or die "Cannot open child pipes!";
@@ -244,7 +245,7 @@ sub create_worker_processes {
       # local $SIG{USR2} = sub { say "$num ($$): Stopping...!"};
 
       my $iteration = 1;
-      while (1) {
+      while (kill 0, $PARENT_PID) { # check if parent is still running
 	say "Child $num (PID $$), beginning iteration $iteration";
 	eval { child_main($num) };
 	say "$@";
@@ -348,12 +349,12 @@ sub corpus_search {
 }
 
 sub kill_worker_processes {
-  # for my $i (0..$cores) {
+  # for my $i (0..$CORES) {
   #   close $from_child[$i] && close $to_child[$i]
   #     or die "Cannot close pipes to child $i (PID pid[$i]): $!";
   #   say "Closed pipe to and from worker $i";
   # }
-  for my $i (0..$cores) {
+  for my $i (0..$CORES) {
     kill HUP => $pid[$i];
     waitpid($pid[$i], 0);
     say "Killed off worker no. $i!";
@@ -1368,7 +1369,7 @@ $mw->g_bind('<Control-Return>', sub { $input_bttn->invoke() } );
 
 $mw->g_bind('<F1>',  sub { Tkx::update_idletasks(); say $mw->g_wm_geometry() });
 $mw->g_bind('<F11>', \&fullscreen);
-$mw->g_bind('<F2>', sub { kill USR1 => $pid[$_] for 0..$cores });
+$mw->g_bind('<F2>', sub { kill USR1 => $pid[$_] for 0..$CORES });
 #-----------------------------------------------------------------------
 # EVENT BINDINGS
 #-----------------------------------------------------------------------
@@ -1879,7 +1880,7 @@ sub word_progress_info {
 	);
       $words[$w]{progress}{info}{pattern_w}->g_grid
 	(-column => 1, -columnspan => 2,
-	 -row => $cores + 2, -sticky => "we", -pady => [5, 5]);
+	 -row => $CORES + 2, -sticky => "we", -pady => [5, 5]);
     }
 
     # cancel button
@@ -1890,7 +1891,7 @@ sub word_progress_info {
        -command => $cancel_callback,
       );
     $words[$w]{progress}{info}{cancel}->g_grid
-      (-column => 3, -row => $cores + 2, -sticky => "we", -pady => [5, 5]);
+      (-column => 3, -row => $CORES + 2, -sticky => "we", -pady => [5, 5]);
   }
 }
 
@@ -2055,12 +2056,12 @@ sub setup_searches {
   my $queue      = [];
   my $processing = {};
   my $finished =   {};
-  my $idle_cores = [0..$cores];
+  my $idle_cores = [0..$CORES];
   $progress_w_cnt = 0;
 
   my @author_nums = make_author_list();
   my $type = shift @author_nums;
-  my $corenum = $cores + 1;
+  my $corenum = $CORES + 1;
   my $step = int @author_nums / $corenum;
   my $modulo = @author_nums % $corenum;
 
@@ -2205,7 +2206,7 @@ sub manage_searches {
   }
 
   # check for updates and finished searches
-  for my $core (0..$cores) {
+  for my $core (0..$CORES) {
     my $input = $from_child[$core]->getline();
     if ( defined $input and $input ne "EOF\n" ) {
       my $word  = $processing->{$core}[0];
@@ -2300,7 +2301,7 @@ sub manage_searches {
 sub abort_searches {
   my ($queue, $processing) = @_;
 
-  for my $core (0..$cores) {
+  for my $core (0..$CORES) {
     # Throw an exception in child process
     kill USR1 => $pid[$core];
     # Wait for EOF on the pipe
@@ -2309,7 +2310,7 @@ sub abort_searches {
 	    and $return eq "EOF\n" ) { };
     # set the removed flag for the unfinished searches form words array
     my @aborted = map { $queue->[$_]{word} } 0 .. $#{ $queue };
-    for my $core (0..$cores) {
+    for my $core (0..$CORES) {
       push @aborted, $processing->{$core}[0]
 	if defined $processing->{$core};
     }

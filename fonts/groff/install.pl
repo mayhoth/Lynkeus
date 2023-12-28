@@ -1,4 +1,4 @@
-#! perl
+#! /usr/bin/perl
 # This script tries to implement the instructions given by Peter Schaffter
 # at https://www.schaffter.ca/mom/momdoc/appendices.html#step-4
 
